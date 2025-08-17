@@ -1,0 +1,74 @@
+{
+    "database": {
+        "type": "sqlite",
+        "host": "localhost",
+        "port": 5432,
+        "name": "sslmgr.db",
+        "username": "",
+        "password": ""
+    },
+    "email": {
+        "smtp_server": "smtp.gmail.com",
+        "smtp_port": 587,
+        "username": "your-email@gmail.com",
+        "password": "your-app-password",
+        "from_address": "ssl-manager@yourcompany.com",
+        "use_tls": true
+    },
+    "snmp": {
+        "enabled": false,
+        "community": "public",
+        "host": "localhost",
+        "port": 161,
+        "oid_base": "1.3.6.1.4.1.12345"
+    },
+    "certificate_authorities": {
+        "letsencrypt": {
+            "enabled": true,
+            "staging": false,
+            "email": "admin@yourcompany.com"
+        },
+        "digicert": {
+            "enabled": false,
+            "api_key": "your-digicert-api-key",
+            "organization_id": "your-org-id"
+        },
+        "comodo": {
+            "enabled": false,
+            "api_key": "your-comodo-api-key",
+            "customer_uri": "your-customer-uri"
+        }
+    },
+    "cloud_providers": {
+        "aws": {
+            "enabled": false,
+            "access_key_id": "your-aws-access-key",
+            "secret_access_key": "your-aws-secret-key",
+            "region": "us-east-1"
+        },
+        "cloudflare": {
+            "enabled": false,
+            "api_token": "your-cloudflare-api-token",
+            "zone_id": "your-zone-id"
+        }
+    },
+    "oauth2": {
+        "client_id": "your-oauth2-client-id",
+        "client_secret": "your-oauth2-client-secret",
+        "redirect_uri": "http://localhost:5000/auth/callback",
+        "authorization_url": "https://your-provider.com/oauth/authorize",
+        "token_url": "https://your-provider.com/oauth/token"
+    },
+    "web": {
+        "host": "0.0.0.0",
+        "port": 5000,
+        "debug": false,
+        "secret_key": "your-secret-key-change-this"
+    },
+    "directories": {
+        "certificates": "/path/to/certificates",
+        "cache": "./cache",
+        "logs": "./logs"
+    },
+    "notification_days": [120, 90, 60, 30, 15, 5, 2, 1]
+}

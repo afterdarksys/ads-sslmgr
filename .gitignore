@@ -1,0 +1,83 @@
+# SSL Manager .gitignore
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Configuration files (contains sensitive data)
+config/config.json
+
+# Cache and temporary files
+cache/
+temp/
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# PHP
+vendor/
+composer.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# SSL certificates and private keys
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.p7b
+*.p7c
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Let's Encrypt directories
+.config/letsencrypt/
+.local/share/letsencrypt/
