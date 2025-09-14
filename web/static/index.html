@@ -61,7 +61,11 @@
                     </a>
                     <a href="#certificates" class="nav-item" data-page="certificates">
                         <i class="fas fa-certificate"></i>
-                        Certificates
+                        All Certificates
+                    </a>
+                    <a href="#my-certificates" class="nav-item" data-page="my-certificates">
+                        <i class="fas fa-user-shield"></i>
+                        My Certificates
                     </a>
                     <a href="#renewals" class="nav-item" data-page="renewals">
                         <i class="fas fa-sync-alt"></i>
@@ -180,8 +184,12 @@
                 <!-- Certificates Page -->
                 <div id="certificates-page" class="page">
                     <div class="page-header">
-                        <h1>SSL Certificates</h1>
+                        <h1>All SSL Certificates</h1>
                         <div class="page-actions">
+                            <button class="btn btn-success" id="upload-certificate-btn">
+                                <i class="fas fa-upload"></i>
+                                Upload Certificate
+                            </button>
                             <button class="btn btn-primary" id="scan-directory-btn">
                                 <i class="fas fa-search"></i>
                                 Scan Directory
@@ -190,29 +198,60 @@
                                 <i class="fas fa-sync-alt"></i>
                                 Refresh
                             </button>
+                            <div class="dropdown">
+                                <button class="btn btn-outline dropdown-toggle" id="bulk-actions-btn">
+                                    <i class="fas fa-tasks"></i>
+                                    Bulk Actions
+                                </button>
+                                <div class="dropdown-menu" id="bulk-actions-menu">
+                                    <a href="#" class="dropdown-item" id="bulk-update-ownership-btn">
+                                        <i class="fas fa-user-edit"></i>
+                                        Update Ownership
+                                    </a>
+                                    <a href="#" class="dropdown-item" id="bulk-revoke-btn" data-admin="true">
+                                        <i class="fas fa-ban"></i>
+                                        Revoke Certificates
+                                    </a>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    
+
                     <div class="filters-bar">
                         <div class="search-box">
                             <i class="fas fa-search"></i>
                             <input type="text" id="certificate-search" placeholder="Search certificates...">
                         </div>
-                        
+
                         <div class="filter-group">
                             <select id="status-filter">
                                 <option value="">All Status</option>
-                                <option value="valid">Valid</option>
-                                <option value="expiring">Expiring Soon</option>
-                                <option value="expired">Expired</option>
+                                <option value="false">Valid</option>
+                                <option value="true">Expired</option>
                             </select>
-                            
+
                             <select id="issuer-filter">
                                 <option value="">All Issuers</option>
+                                <option value="letsencrypt">Let's Encrypt</option>
+                                <option value="digicert">DigiCert</option>
+                                <option value="comodo">Comodo</option>
+                                <option value="globalsign">GlobalSign</option>
+                            </select>
+
+                            <select id="owner-filter">
+                                <option value="">All Owners</option>
+                            </select>
+
+                            <select id="environment-filter">
+                                <option value="">All Environments</option>
+                                <option value="production">Production</option>
+                                <option value="staging">Staging</option>
+                                <option value="development">Development</option>
+                                <option value="testing">Testing</option>
                             </select>
                         </div>
                     </div>
-                    
+
                     <div class="certificates-table-container">
                         <table class="certificates-table">
                             <thead>
@@ -222,6 +261,8 @@
                                     </th>
                                     <th>Common Name</th>
                                     <th>Issuer</th>
+                                    <th>Owner</th>
+                                    <th>Environment</th>
                                     <th>Expires</th>
                                     <th>Status</th>
                                     <th>Actions</th>
@@ -229,13 +270,131 @@
                             </thead>
                             <tbody id="certificates-tbody">
                                 <tr>
-                                    <td colspan="6" class="no-data">Loading certificates...</td>
+                                    <td colspan="8" class="no-data">Loading certificates...</td>
                                 </tr>
                             </tbody>
                         </table>
                     </div>
-                    
+
                     <div class="pagination" id="certificates-pagination">
+                        <!-- Pagination will be inserted here -->
+                    </div>
+                </div>
+
+                <!-- My Certificates Page -->
+                <div id="my-certificates-page" class="page">
+                    <div class="page-header">
+                        <h1>My Certificates</h1>
+                        <div class="page-actions">
+                            <button class="btn btn-success" id="upload-my-certificate-btn">
+                                <i class="fas fa-upload"></i>
+                                Upload Certificate
+                            </button>
+                            <button class="btn btn-outline" id="refresh-my-certificates-btn">
+                                <i class="fas fa-sync-alt"></i>
+                                Refresh
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="user-certificate-stats" id="my-certificate-stats">
+                        <div class="stat-card">
+                            <div class="stat-icon">
+                                <i class="fas fa-certificate"></i>
+                            </div>
+                            <div class="stat-content">
+                                <h3 id="my-total-certificates">0</h3>
+                                <p>My Certificates</p>
+                            </div>
+                        </div>
+
+                        <div class="stat-card warning">
+                            <div class="stat-icon">
+                                <i class="fas fa-exclamation-triangle"></i>
+                            </div>
+                            <div class="stat-content">
+                                <h3 id="my-expiring-certificates">0</h3>
+                                <p>Expiring Soon</p>
+                            </div>
+                        </div>
+
+                        <div class="stat-card success">
+                            <div class="stat-icon">
+                                <i class="fas fa-check-circle"></i>
+                            </div>
+                            <div class="stat-content">
+                                <h3 id="my-valid-certificates">0</h3>
+                                <p>Valid</p>
+                            </div>
+                        </div>
+
+                        <div class="stat-card danger">
+                            <div class="stat-icon">
+                                <i class="fas fa-times-circle"></i>
+                            </div>
+                            <div class="stat-content">
+                                <h3 id="my-expired-certificates">0</h3>
+                                <p>Expired</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="filters-bar">
+                        <div class="search-box">
+                            <i class="fas fa-search"></i>
+                            <input type="text" id="my-certificate-search" placeholder="Search my certificates...">
+                        </div>
+
+                        <div class="filter-group">
+                            <select id="my-status-filter">
+                                <option value="">All Status</option>
+                                <option value="false">Valid</option>
+                                <option value="true">Expired</option>
+                            </select>
+
+                            <select id="my-issuer-filter">
+                                <option value="">All Issuers</option>
+                                <option value="letsencrypt">Let's Encrypt</option>
+                                <option value="digicert">DigiCert</option>
+                                <option value="comodo">Comodo</option>
+                                <option value="globalsign">GlobalSign</option>
+                            </select>
+
+                            <select id="my-environment-filter">
+                                <option value="">All Environments</option>
+                                <option value="production">Production</option>
+                                <option value="staging">Staging</option>
+                                <option value="development">Development</option>
+                                <option value="testing">Testing</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="certificates-table-container">
+                        <table class="certificates-table">
+                            <thead>
+                                <tr>
+                                    <th>
+                                        <input type="checkbox" id="select-all-my-certificates">
+                                    </th>
+                                    <th>Common Name</th>
+                                    <th>Issuer</th>
+                                    <th>Environment</th>
+                                    <th>Application</th>
+                                    <th>Expires</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="my-certificates-tbody">
+                                <tr>
+                                    <td colspan="8" class="no-data">Loading your certificates...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="pagination" id="my-certificates-pagination">
                         <!-- Pagination will be inserted here -->
                     </div>
                 </div>

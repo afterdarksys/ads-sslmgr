@@ -25,3 +25,5 @@ jinja2>=3.1.0
 marshmallow>=3.20.0
 bcrypt>=4.0.0
 authlib>=1.2.0
+pycose>=1.1.0
+cbor2>=5.4.0

@@ -70,5 +70,37 @@
         "cache": "./cache",
         "logs": "./logs"
     },
+    "certificate_formats": {
+        "supported_extensions": [".pem", ".crt", ".cer", ".der", ".p7b", ".p7c", ".p10", ".csr", ".req", ".p12", ".pfx", ".pvk", ".cose", ".cbor", ".cwt"],
+        "default_export_format": "pkcs10_pem",
+        "enable_format_detection": true,
+        "cose_support": {
+            "enabled": true,
+            "supported_algorithms": ["ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "RS256", "RS384", "RS512"],
+            "default_algorithm": "ES256",
+            "embed_x509_certificates": true
+        },
+        "cwt_support": {
+            "enabled": true,
+            "default_claims": {
+                "iss": "SSL Certificate Manager",
+                "aud": "certificate-system",
+                "iat": "auto",
+                "exp": "auto"
+            }
+        }
+    },
+    "pkcs11": {
+        "enabled": false,
+        "library_path": "/usr/lib/pkcs11/opensc-pkcs11.so",
+        "token_label": "SmartCard",
+        "pin": "",
+        "experimental_warning": "PKCS11 support is experimental - use with caution in production"
+    },
+    "legacy_formats": {
+        "pvk_import_enabled": true,
+        "pvk_export_warning": "PVK export disabled - use modern PKCS10 format instead",
+        "legacy_conversion_recommended": true
+    },
     "notification_days": [120, 90, 60, 30, 15, 5, 2, 1]
 }

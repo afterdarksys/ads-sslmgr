@@ -250,6 +250,16 @@ class DatabaseManager:
     def get_session(self):
         """Get a database session."""
         return self.SessionLocal()
+
+    def initialize_database(self):
+        """Initialize database tables"""
+        try:
+            # Create all tables
+            Base.metadata.create_all(self.engine)
+            return True
+        except Exception as e:
+            print(f"Error initializing database: {e}")
+            return False
     
     def drop_tables(self):
         """Drop all database tables."""
