@@ -1,0 +1,109 @@
+{
+  "ticketing": {
+    "_comment": "Choose 'jira' for enterprises or 'afterdark' for small/medium businesses",
+    "system": "afterdark",
+
+    "jira": {
+      "enabled": false,
+      "server_url": "https://your-company.atlassian.net",
+      "username": "your-email@company.com",
+      "api_token": "your_jira_api_token",
+      "password": null,
+
+      "project_key": "CERT",
+      "default_issue_type": "Task",
+
+      "_comment_priority": "Map SSL Manager priorities to JIRA priorities",
+      "critical_priority": "Highest",
+      "high_priority": "High",
+      "medium_priority": "Medium",
+      "low_priority": "Low",
+
+      "_comment_labels": "Default labels for all tickets",
+      "default_labels": ["certificate", "ssl", "security"],
+      "default_component": "SSL/TLS Infrastructure",
+
+      "_comment_assignee": "Configure default and priority-based assignees",
+      "default_assignee": "ssl-team-lead",
+      "assignee_by_priority": {
+        "critical": "security-lead",
+        "high": "ssl-team-lead",
+        "medium": "ssl-admin",
+        "low": "ssl-admin"
+      },
+
+      "_comment_custom_fields": "Map custom fields for better tracking",
+      "custom_fields": {
+        "certificate_id": "customfield_10001",
+        "days_until_expiry": "customfield_10002",
+        "certificate_domain": "customfield_10003"
+      }
+    },
+
+    "afterdark": {
+      "_comment": "After Dark Systems Ticketing - Perfect for small/medium businesses",
+      "enabled": true,
+      "api_url": "https://support.afterdarksys.com/api/v1",
+      "api_key": "your_afterdark_api_key",
+      "organization_id": "your_org_id",
+
+      "_comment_queue": "Which queue to create tickets in",
+      "default_queue": "SSL Certificates",
+
+      "_comment_tags": "Default tags for all tickets",
+      "default_tags": ["ssl", "certificate", "security"],
+
+      "_comment_assignee": "Configure default and priority-based assignees",
+      "default_assignee": "admin@yourcompany.com",
+      "assignee_by_priority": {
+        "critical": "security@yourcompany.com",
+        "high": "sysadmin@yourcompany.com",
+        "medium": "support@yourcompany.com",
+        "low": "support@yourcompany.com"
+      }
+    },
+
+    "_comment_servicenow": "ServiceNow integration (optional - for enterprises)",
+    "servicenow": {
+      "enabled": false,
+      "instance_url": "https://your-company.service-now.com",
+      "username": "api_user",
+      "password": "api_password",
+      "assignment_group": "SSL Certificate Team",
+      "category": "Security",
+      "subcategory": "SSL Certificates"
+    },
+
+    "_comment_zendesk": "Zendesk integration (optional)",
+    "zendesk": {
+      "enabled": false,
+      "subdomain": "your-company",
+      "email": "support@yourcompany.com",
+      "api_token": "your_zendesk_token",
+      "default_group": "SSL Certificate Team",
+      "default_tags": ["ssl", "certificate"]
+    }
+  },
+
+  "_comment_web_ui": "Used for ticket descriptions to link back to certificate",
+  "web_ui_url": "https://sslmgr.yourcompany.com",
+
+  "_comment_automatic_ticketing": "Configure when to automatically create tickets",
+  "automatic_ticketing": {
+    "expiring_certificates": true,
+    "renewal_failures": true,
+    "threat_detection": true,
+    "validation_failures": true,
+
+    "_comment_thresholds": "When to create tickets for expiring certs",
+    "expiry_ticket_thresholds": [7, 15, 30],
+
+    "_comment_update": "Update tickets when status changes",
+    "update_on_renewal_success": true,
+    "close_on_renewal_success": true,
+
+    "_comment_suppress": "Don't create duplicate tickets",
+    "suppress_duplicates": true,
+    "duplicate_window_days": 7
+  }
+}
