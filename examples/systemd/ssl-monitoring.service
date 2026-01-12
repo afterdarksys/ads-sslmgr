@@ -1,0 +1,23 @@
+[Unit]
+Description=SSL Certificate Monitoring
+Documentation=https://github.com/afterdarksys/ads-sslmgr
+After=network.target
+
+[Service]
+Type=oneshot
+User=sslmanager
+Group=sslmanager
+WorkingDirectory=/opt/ads-sslmgr
+ExecStart=/usr/bin/python3 /opt/ads-sslmgr/scripts/run_monitoring.py
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ads-sslmgr/logs /opt/ads-sslmgr/temp /var/lib/node_exporter/textfile_collector
+
+[Install]
+WantedBy=multi-user.target

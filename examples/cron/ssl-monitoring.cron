@@ -1,0 +1,16 @@
+# SSL Certificate Monitoring Cron Jobs
+# Add to crontab with: crontab -e
+# Or install to /etc/cron.d/ssl-monitoring
+
+# Run complete monitoring every hour (SNMP + Prometheus)
+0 * * * * /usr/bin/python3 /opt/ads-sslmgr/scripts/run_monitoring.py >> /var/log/ssl-monitoring.log 2>&1
+
+# Alternative: Run SNMP and Prometheus separately
+# SNMP traps every hour
+#0 * * * * /usr/bin/python3 /opt/ads-sslmgr/scripts/run_monitoring.py --snmp >> /var/log/ssl-monitoring.log 2>&1
+
+# Prometheus export every 5 minutes
+#*/5 * * * * /usr/bin/python3 /opt/ads-sslmgr/scripts/prometheus_exporter.py >> /var/log/ssl-monitoring.log 2>&1
+
+# Daily certificate scan at 2 AM
+#0 2 * * * /usr/bin/python3 /opt/ads-sslmgr/cli/ssl_manager.py scan /path/to/certificates >> /var/log/ssl-scan.log 2>&1

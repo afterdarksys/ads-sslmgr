@@ -19,8 +19,18 @@
         "enabled": false,
         "community": "public",
         "host": "localhost",
-        "port": 161,
-        "oid_base": "1.3.6.1.4.1.12345"
+        "port": 162,
+        "oid_base": "1.3.6.1.4.1.12345",
+        "trap_frequency_hours": [1, 3, 6, 12, 24, 36, 48, 72],
+        "trap_frequency_enabled": true,
+        "trap_frequency_comment": "Trap frequencies in hours before expiration - gets more annoying as expiration approaches"
+    },
+    "prometheus": {
+        "enabled": false,
+        "textfile_path": "/var/lib/node_exporter/textfile_collector",
+        "metrics_file": "ssl_certificates.prom",
+        "include_metadata": true,
+        "comment": "Export certificate expiry metrics for Prometheus node_exporter textfile collector"
     },
     "certificate_authorities": {
         "letsencrypt": {

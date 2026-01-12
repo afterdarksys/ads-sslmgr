@@ -2,7 +2,7 @@
 SNMP notification system for SSL certificate monitoring
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from pysnmp.hlapi import *
 from pysnmp.proto.rfc1902 import OctetString, Integer32
@@ -17,29 +17,102 @@ class SNMPNotifier:
         self.config = config
         self.db_manager = db_manager
         self.snmp_config = config.get('snmp', {})
-        
+
         # SNMP configuration
         self.enabled = self.snmp_config.get('enabled', False)
         self.community = self.snmp_config.get('community', 'public')
         self.host = self.snmp_config.get('host', 'localhost')
         self.port = self.snmp_config.get('port', 162)  # SNMP trap port
         self.oid_base = self.snmp_config.get('oid_base', '1.3.6.1.4.1.12345')
-        
+
+        # Trap frequency configuration (in hours before expiration)
+        # Gets more frequent as expiration approaches
+        self.trap_frequency_enabled = self.snmp_config.get('trap_frequency_enabled', True)
+        self.trap_frequency_hours = sorted(
+            self.snmp_config.get('trap_frequency_hours', [1, 3, 6, 12, 24, 36, 48, 72]),
+            reverse=True  # Sort descending for easier processing
+        )
+
         # Define OIDs for different notification types
         self.oids = {
             'certificate_expiring': f"{self.oid_base}.1.1",
-            'certificate_expired': f"{self.oid_base}.1.2", 
+            'certificate_expired': f"{self.oid_base}.1.2",
             'renewal_success': f"{self.oid_base}.2.1",
             'renewal_failure': f"{self.oid_base}.2.2",
             'scan_completed': f"{self.oid_base}.3.1",
             'system_error': f"{self.oid_base}.4.1"
         }
-    
-    def send_expiration_trap(self, cert: Certificate, days_before: int) -> bool:
-        """Send SNMP trap for certificate expiration warning."""
+
+    def _should_send_trap(self, cert: Certificate) -> bool:
+        """
+        Determine if a trap should be sent based on escalating frequency.
+        Returns True if enough time has passed since the last trap.
+        """
+        if not self.trap_frequency_enabled:
+            return True
+
+        # Calculate hours until expiration
+        time_until_expiry = cert.not_valid_after - datetime.utcnow()
+        hours_until_expiry = time_until_expiry.total_seconds() / 3600
+
+        # Find the appropriate frequency threshold
+        frequency_hours = None
+        for freq in self.trap_frequency_hours:
+            if hours_until_expiry <= freq:
+                frequency_hours = freq
+                break
+
+        # If no threshold matches, don't send trap yet
+        if frequency_hours is None:
+            return False
+
+        # Get the last trap sent for this certificate
+        session = self.db_manager.get_session()
+        try:
+            last_notification = session.query(NotificationLog).filter(
+                NotificationLog.certificate_id == cert.id,
+                NotificationLog.notification_type == 'snmp',
+                NotificationLog.status == 'sent'
+            ).order_by(NotificationLog.sent_at.desc()).first()
+
+            # If no previous notification, send one
+            if not last_notification:
+                return True
+
+            # Calculate hours since last notification
+            time_since_last = datetime.utcnow() - last_notification.sent_at
+            hours_since_last = time_since_last.total_seconds() / 3600
+
+            # Send if enough time has passed based on current frequency
+            return hours_since_last >= frequency_hours
+
+        finally:
+            session.close()
+
+    def _get_frequency_for_hours(self, hours_until_expiry: float) -> Optional[int]:
+        """Get the trap frequency (in hours) for the given hours until expiry."""
+        for freq in self.trap_frequency_hours:
+            if hours_until_expiry <= freq:
+                return freq
+        return None
+
+    def send_expiration_trap(self, cert: Certificate, days_before: int = None) -> bool:
+        """
+        Send SNMP trap for certificate expiration warning.
+        Uses escalating frequency if trap_frequency_enabled is True.
+        """
         if not self.enabled:
             return False
-        
+
+        # Check if we should send a trap based on frequency
+        if not self._should_send_trap(cert):
+            return False
+
+        # Calculate days_before if not provided
+        if days_before is None:
+            time_until_expiry = cert.not_valid_after - datetime.utcnow()
+            days_before = int(time_until_expiry.total_seconds() / 86400)
+
         try:
             # Prepare trap data
             trap_oid = self.oids['certificate_expiring']

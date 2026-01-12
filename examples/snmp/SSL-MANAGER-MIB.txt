@@ -1,0 +1,304 @@
+SSL-MANAGER-MIB DEFINITIONS ::= BEGIN
+
+IMPORTS
+    MODULE-IDENTITY, OBJECT-TYPE, NOTIFICATION-TYPE,
+    enterprises, Integer32
+        FROM SNMPv2-SMI
+    TEXTUAL-CONVENTION, DisplayString
+        FROM SNMPv2-TC
+    MODULE-COMPLIANCE, OBJECT-GROUP, NOTIFICATION-GROUP
+        FROM SNMPv2-CONF;
+
+sslManagerMIB MODULE-IDENTITY
+    LAST-UPDATED "202601120000Z"
+    ORGANIZATION "After Dark Systems"
+    CONTACT-INFO
+        "Email: support@afterdarksystems.com
+         Web: https://github.com/afterdarksys/ads-sslmgr"
+    DESCRIPTION
+        "MIB module for SSL Certificate Manager monitoring and notifications.
+
+         This MIB defines SNMP traps for certificate expiration warnings,
+         renewal notifications, and system events."
+    REVISION "202601120000Z"
+    DESCRIPTION "Initial version"
+    ::= { enterprises 12345 }
+
+-- Main groups
+sslManagerNotifications  OBJECT IDENTIFIER ::= { sslManagerMIB 0 }
+sslManagerObjects        OBJECT IDENTIFIER ::= { sslManagerMIB 1 }
+sslManagerConformance    OBJECT IDENTIFIER ::= { sslManagerMIB 2 }
+
+-- Certificate objects
+certificateObjects       OBJECT IDENTIFIER ::= { sslManagerObjects 1 }
+renewalObjects          OBJECT IDENTIFIER ::= { sslManagerObjects 2 }
+scanObjects             OBJECT IDENTIFIER ::= { sslManagerObjects 3 }
+systemObjects           OBJECT IDENTIFIER ::= { sslManagerObjects 4 }
+
+-- Certificate information objects
+certCommonName OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..255))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "The Common Name (CN) of the certificate."
+    ::= { certificateObjects 1 }
+
+certFilePath OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..1024))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "The file system path where the certificate is stored."
+    ::= { certificateObjects 2 }
+
+certDaysBeforeExpiry OBJECT-TYPE
+    SYNTAX      Integer32
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "Number of days before the certificate expires.
+         Negative values indicate days since expiration."
+    ::= { certificateObjects 3 }
+
+certExpiryDate OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..64))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "The expiration date of the certificate in ISO 8601 format."
+    ::= { certificateObjects 4 }
+
+certSerialNumber OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..128))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "The serial number of the certificate."
+    ::= { certificateObjects 5 }
+
+certIssuerCategory OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..64))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "The issuer category (e.g., letsencrypt, digicert, self-signed)."
+    ::= { certificateObjects 6 }
+
+-- Renewal information objects
+renewalMessage OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..1024))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "Message describing the renewal result."
+    ::= { renewalObjects 1 }
+
+renewalTimestamp OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..64))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "Timestamp when the renewal was attempted in ISO 8601 format."
+    ::= { renewalObjects 2 }
+
+-- Scan information objects
+scanCertsFound OBJECT-TYPE
+    SYNTAX      Integer32
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "Number of certificates found during scan."
+    ::= { scanObjects 1 }
+
+scanCertsAdded OBJECT-TYPE
+    SYNTAX      Integer32
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "Number of new certificates added during scan."
+    ::= { scanObjects 2 }
+
+scanCertsUpdated OBJECT-TYPE
+    SYNTAX      Integer32
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "Number of certificates updated during scan."
+    ::= { scanObjects 3 }
+
+scanPath OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..1024))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "Path that was scanned for certificates."
+    ::= { scanObjects 4 }
+
+scanTimestamp OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..64))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "Timestamp when the scan completed in ISO 8601 format."
+    ::= { scanObjects 5 }
+
+-- System information objects
+systemComponent OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..64))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "Component that generated the error."
+    ::= { systemObjects 1 }
+
+systemErrorMessage OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..1024))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "Detailed error message."
+    ::= { systemObjects 2 }
+
+systemErrorTimestamp OBJECT-TYPE
+    SYNTAX      DisplayString (SIZE (0..64))
+    MAX-ACCESS  accessible-for-notify
+    STATUS      current
+    DESCRIPTION
+        "Timestamp when the error occurred in ISO 8601 format."
+    ::= { systemObjects 3 }
+
+-- Notification definitions
+certificateExpiring NOTIFICATION-TYPE
+    OBJECTS {
+        certCommonName,
+        certFilePath,
+        certDaysBeforeExpiry,
+        certExpiryDate,
+        certSerialNumber,
+        certIssuerCategory
+    }
+    STATUS      current
+    DESCRIPTION
+        "This trap is sent when a certificate is approaching expiration.
+         The frequency of this trap increases as expiration approaches,
+         based on the trap_frequency_hours configuration."
+    ::= { sslManagerNotifications 1 }
+
+certificateExpired NOTIFICATION-TYPE
+    OBJECTS {
+        certCommonName,
+        certFilePath,
+        certDaysBeforeExpiry,
+        certExpiryDate
+    }
+    STATUS      current
+    DESCRIPTION
+        "This trap is sent when a certificate has expired."
+    ::= { sslManagerNotifications 2 }
+
+certificateRenewalSuccess NOTIFICATION-TYPE
+    OBJECTS {
+        certCommonName,
+        certFilePath,
+        renewalMessage,
+        certSerialNumber,
+        renewalTimestamp
+    }
+    STATUS      current
+    DESCRIPTION
+        "This trap is sent when a certificate is successfully renewed."
+    ::= { sslManagerNotifications 3 }
+
+certificateRenewalFailure NOTIFICATION-TYPE
+    OBJECTS {
+        certCommonName,
+        certFilePath,
+        renewalMessage,
+        certSerialNumber,
+        renewalTimestamp
+    }
+    STATUS      current
+    DESCRIPTION
+        "This trap is sent when certificate renewal fails."
+    ::= { sslManagerNotifications 4 }
+
+scanCompleted NOTIFICATION-TYPE
+    OBJECTS {
+        scanCertsFound,
+        scanCertsAdded,
+        scanCertsUpdated,
+        scanPath,
+        scanTimestamp
+    }
+    STATUS      current
+    DESCRIPTION
+        "This trap is sent when a certificate directory scan completes."
+    ::= { sslManagerNotifications 5 }
+
+systemError NOTIFICATION-TYPE
+    OBJECTS {
+        systemComponent,
+        systemErrorMessage,
+        systemErrorTimestamp
+    }
+    STATUS      current
+    DESCRIPTION
+        "This trap is sent when a system error occurs."
+    ::= { sslManagerNotifications 6 }
+
+-- Conformance information
+sslManagerCompliances OBJECT IDENTIFIER ::= { sslManagerConformance 1 }
+sslManagerGroups      OBJECT IDENTIFIER ::= { sslManagerConformance 2 }
+
+sslManagerCompliance MODULE-COMPLIANCE
+    STATUS      current
+    DESCRIPTION
+        "The compliance statement for entities which implement
+         the SSL Manager MIB."
+    MODULE      -- this module
+        MANDATORY-GROUPS {
+            sslManagerObjectGroup,
+            sslManagerNotificationGroup
+        }
+    ::= { sslManagerCompliances 1 }
+
+sslManagerObjectGroup OBJECT-GROUP
+    OBJECTS {
+        certCommonName,
+        certFilePath,
+        certDaysBeforeExpiry,
+        certExpiryDate,
+        certSerialNumber,
+        certIssuerCategory,
+        renewalMessage,
+        renewalTimestamp,
+        scanCertsFound,
+        scanCertsAdded,
+        scanCertsUpdated,
+        scanPath,
+        scanTimestamp,
+        systemComponent,
+        systemErrorMessage,
+        systemErrorTimestamp
+    }
+    STATUS      current
+    DESCRIPTION
+        "A collection of objects providing certificate and system information."
+    ::= { sslManagerGroups 1 }
+
+sslManagerNotificationGroup NOTIFICATION-GROUP
+    NOTIFICATIONS {
+        certificateExpiring,
+        certificateExpired,
+        certificateRenewalSuccess,
+        certificateRenewalFailure,
+        scanCompleted,
+        systemError
+    }
+    STATUS      current
+    DESCRIPTION
+        "A collection of notifications for certificate events."
+    ::= { sslManagerGroups 2 }
+
+END

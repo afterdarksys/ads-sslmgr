@@ -1,0 +1,20 @@
+[Unit]
+Description=SSL Certificate Monitoring Timer
+Documentation=https://github.com/afterdarksys/ads-sslmgr
+Requires=ssl-monitoring.service
+
+[Timer]
+# Run every hour
+OnCalendar=hourly
+
+# Run 5 minutes after boot if missed
+OnBootSec=5min
+
+# If system was off when timer should have run, run it when system boots
+Persistent=true
+
+# Add random delay up to 5 minutes to prevent all systems hitting at once
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
