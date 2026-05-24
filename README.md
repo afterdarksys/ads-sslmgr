@@ -1,108 +1,173 @@
 # SSL Certificate Management System
 
-A comprehensive SSL certificate management system that provides automated certificate monitoring, renewal, and notification capabilities.
+A comprehensive SSL certificate management system for monitoring, renewing, and managing certificates across public CAs, cloud providers, and internal private CAs.
 
 ## Features
 
-- **Extended Certificate Format Support**: Read SSL certificates in multiple formats including PEM, P7B, DER, PKCS#10, PKCS#12, PVK, COSE, CWT, and more
-- **Advanced Certificate Analysis**: Extract issuer, subject, subjectAltName, CN, expiration dates, and extended certificate properties
-- **Database Storage**: Enhanced certificate data storage with ownership tracking and metadata
-- **Automated Notifications**: Email alerts at 120, 90, 60, 30, 15, 5, 2, and 1 days before expiration
-- **SNMP Trap Monitoring**: Escalating frequency SNMP traps that get more frequent as expiration approaches
-- **Prometheus Integration**: Export certificate expiry metrics for graphing and alerting in Prometheus/Grafana
-- **Multi-CA Support**: Integration with Let's Encrypt, DigiCert, Comodo, and other certificate authorities
-- **Cloud Integration**: AWS and Cloudflare certificate management and renewal
-- **Multiple Interfaces**: Python CLI, PHP CLI, and modern web SPA interface
-- **OAuth2 Authentication**: Secure access control with modern authentication
-- **PKCS#11 Smart Card Support**: Experimental smart card and hardware security module integration
-- **Modern Certificate Standards**: Support for COSE (CBOR Object Signing) and CWT (CBOR Web Token) formats
+### Certificate Management
+- **Multi-format support**: PEM, DER, PKCS#7, PKCS#10, PKCS#12, PVK, COSE, CWT
+- **Deep parsing**: issuer, subject, SANs, expiry, key usage, extended key usage, issuer categorization
+- **Ownership tracking**: map certificates to teams, applications, and environments
+- **Database-backed**: SQLite or PostgreSQL via SQLAlchemy, schema managed with Alembic
+
+### Certificate Authorities
+- **Let's Encrypt** — automated ACME renewal
+- **DigiCert** — API-based issuance with CSR generation and polling
+- **Sectigo (Comodo)** — SCM API integration
+- **AWS ACM** — cloud certificate management
+- **Cloudflare** — zone-based certificate management
+- **Private CA** — full internal PKI: root → intermediate → issuing CA hierarchy, certificate issuance, revocation, CRL generation
+
+### Certificate Transparency
+- Real SCT parsing (OID `1.3.6.1.4.1.11129.2.4.2`)
+- Chrome CT policy enforcement (≥2 SCTs for validity >180 days, ≥1 for ≤180 days)
+- Private/internal CAs automatically exempt
+- CT compliance status embedded in validation results
+
+### COSE / CWT
+- Real `COSE_Sign1` export (CBOR tag 18, RFC 8152) with ES256 ECDSA signing
+- Signed CWT export (RFC 8392) — claims wrapped in `COSE_Sign1` envelope
+- COSE/CWT certificate parsing and format detection
+
+### Notifications & Monitoring
+- **Email alerts** at 120, 90, 60, 30, 15, 5, 2, and 1 days before expiration
+- **SNMP traps** with escalating frequency as expiration approaches
+- **Prometheus metrics** export for Grafana dashboards
+
+### Interfaces
+- **Python CLI** (`cli/ssl_manager.py`) — scan, list, renew, revoke, export, private CA management
+- **REST API** (`web/api.py`) — full Flask API with JWT auth, all operations exposed as endpoints
+- **OAuth2** — user authentication and role-based access control
+
+---
 
 ## Installation
 
-### Python Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### PHP Dependencies
+### Database setup
+
 ```bash
-composer install
+# Initialize schema
+alembic upgrade head
+
+# Or let the app create tables directly
+python -c "from database.models import DatabaseManager, get_database_url; import json; cfg=json.load(open('config/config.json')); DatabaseManager(get_database_url(cfg)).create_tables()"
 ```
 
-### Database Setup
-```bash
-python scripts/setup_database.py
-```
-
-## Usage
-
-### Python CLI
-```bash
-python cli/ssl_manager.py --help
-```
-
-### PHP CLI
-```bash
-php cli/ssl_manager.php --help
-```
-
-### Web Interface
-```bash
-python start_web_server.py
-```
+---
 
 ## Configuration
 
-Copy `config/config.example.json` to `config/config.json` and update with your settings.
-
-## Monitoring Integrations
-
-### SNMP Trap Monitoring
-
-Send SNMP traps when certificates are expiring, with escalating frequency that becomes more annoying as expiration approaches:
-
 ```bash
-# Configure in config/config.json
-{
-  "snmp": {
-    "enabled": true,
-    "trap_frequency_hours": [1, 3, 6, 12, 24, 36, 48, 72]
-  }
-}
-
-# Run monitoring
-python scripts/run_monitoring.py --snmp
+cp config/config.example.json config/config.json
+# Edit config/config.json with your settings
 ```
 
-### Prometheus Metrics Export
+Key sections: `database`, `certificate_authorities`, `cloud_providers`, `email`, `snmp`, `prometheus`, `private_ca`.
 
-Export certificate expiry metrics for Prometheus/Grafana:
+---
+
+## CLI Usage
 
 ```bash
-# Configure in config/config.json
-{
-  "prometheus": {
-    "enabled": true,
-    "textfile_path": "/var/lib/node_exporter/textfile_collector"
-  }
-}
+python cli/ssl_manager.py --help
 
-# Export metrics
-python scripts/prometheus_exporter.py
+# Scan a directory for certificates
+python cli/ssl_manager.py scan directory /etc/ssl/certs
+
+# List expiring certificates
+python cli/ssl_manager.py list certificates --expiring 30
+
+# Renew a certificate
+python cli/ssl_manager.py renew certificate <id>
+
+# Private CA — create root CA
+python cli/ssl_manager.py ca create-root my-root-ca --common-name "My Root CA" --validity-years 20
+
+# Private CA — issue a certificate
+python cli/ssl_manager.py ca issue <ca-id> server.example.com --san server.example.com --days 365 --out-cert cert.pem --out-key key.pem
+
+# Private CA — revoke and regenerate CRL
+python cli/ssl_manager.py ca revoke <ca-id> <cert-id> --reason key_compromise
+python cli/ssl_manager.py ca crl <ca-id> --regenerate --out ca.crl.pem
 ```
 
-**See [docs/MONITORING_SETUP.md](docs/MONITORING_SETUP.md) for detailed setup instructions.**
+---
+
+## Web API
+
+```bash
+python web/api.py --host 0.0.0.0 --port 5000
+```
+
+Key endpoints:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/auth/login` | Obtain JWT token |
+| GET | `/api/certificates` | List certificates |
+| POST | `/api/certificates/scan` | Scan directory |
+| POST | `/api/certificates/<id>/renew` | Renew certificate |
+| GET | `/api/ca` | List private CAs |
+| POST | `/api/ca/root` | Create root CA |
+| POST | `/api/ca/<id>/issue` | Issue certificate |
+| POST | `/api/ca/<id>/certificates/<id>/revoke` | Revoke certificate |
+| GET | `/api/ca/<id>/crl` | Fetch CRL |
+
+---
+
+## Private CA
+
+Full PKI hierarchy support: root → intermediate → issuing → leaf certificates.
+
+```bash
+# Create chain
+python cli/ssl_manager.py ca create-root corp-root --common-name "Corp Root CA" --validity-years 20
+python cli/ssl_manager.py ca create-intermediate corp-inter <root-id> --validity-years 10
+python cli/ssl_manager.py ca create-issuing corp-issuing <inter-id> --validity-years 5
+
+# Issue server cert with SANs
+python cli/ssl_manager.py ca issue <issuing-id> web.corp.internal \
+  --san web.corp.internal --san www.corp.internal \
+  --days 365 --out-cert web.pem --out-key web.key
+```
+
+Private CA credentials are encrypted at rest using Fernet — set `SSLMGR_ENCRYPTION_KEY` before running:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+export SSLMGR_ENCRYPTION_KEY=<output>
+```
+
+---
+
+## Testing
+
+```bash
+python -m pytest tests/ -q
+```
+
+Test coverage: CA manager (create/issue/revoke/CRL), certificate parser (PEM/COSE/CWT), CT utilities, renewal router, private CA integration.
+
+---
 
 ## Directory Structure
 
-- `database/` - Database models and migrations
-- `notifications/` - Email and SNMP notification handlers
-- `integrations/` - CA and cloud provider integrations
-- `cli/` - Command line interfaces
-- `web/` - Web application and modern SPA interface
-- `config/` - Configuration files and examples
-- `scripts/` - Utility scripts and setup tools
-- `auth/` - Authentication and authorization modules
-- `cache/` - Certificate caching system
-- `logs/` - System and application logs
-- `temp/` - Temporary files and processing
+```
+core/               Core business logic (certificate manager, parser, renewal router)
+ca/                 Private CA implementation and DB-backed manager
+database/           SQLAlchemy models and Alembic migrations
+integrations/       CA and cloud provider integrations
+helpers/            Utilities: OpenSSL, CT/SCT parsing
+validators/         Certificate validation engine
+notifications/      Email and SNMP notification handlers
+cli/                Command line interface
+web/                Flask REST API
+auth/               OAuth2 / JWT authentication
+config/             Configuration files
+tests/              Integration test suite
+scripts/            Utility and setup scripts
+```
