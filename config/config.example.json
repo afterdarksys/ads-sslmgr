@@ -43,9 +43,9 @@
             "api_key": "your-digicert-api-key",
             "organization_id": "your-org-id"
         },
-        "comodo": {
+        "sectigo": {
             "enabled": false,
-            "api_key": "your-comodo-api-key",
+            "api_key": "your-sectigo-api-key",
             "customer_uri": "your-customer-uri"
         }
     },

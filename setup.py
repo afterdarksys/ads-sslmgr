@@ -1,195 +1,223 @@
 #!/usr/bin/env python3
 """
-SSL Certificate Manager Setup Script
-Initializes the database and sets up the system
+SSL Certificate Manager — Setup Script
+Initializes the database, creates directories, and writes a default config if needed.
 """
 
+import json
 import os
 import sys
-import json
-import sqlite3
 from pathlib import Path
 
-# Add project root to path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from database.models import DatabaseManager, get_database_url
+
+# ── Default configuration ─────────────────────────────────────────────────────
+
+DEFAULT_CONFIG = {
+    "database": {
+        "type": "sqlite",
+        "name": str(project_root / "sslmgr.db"),
+        "host": "localhost",
+        "port": 5432,
+        "username": "",
+        "password": ""
+    },
+    "email": {
+        "smtp_server": "smtp.gmail.com",
+        "smtp_port": 587,
+        "username": "",
+        "password": "",
+        "from_address": "ssl-manager@yourcompany.com",
+        "use_tls": True
+    },
+    "snmp": {
+        "enabled": False,
+        "community": "public",
+        "host": "localhost",
+        "port": 161,
+        "oid_base": "1.3.6.1.4.1.12345"
+    },
+    "certificate_authorities": {
+        "letsencrypt": {
+            "enabled": False,
+            "staging": True,
+            "email": ""
+        },
+        "digicert": {
+            "enabled": False,
+            "api_key": "",
+            "organization_id": ""
+        },
+        "sectigo": {
+            "enabled": False,
+            "login": "",
+            "password": "",
+            "customer_uri": "",
+            "org_id": ""
+        }
+    },
+    "cloud_providers": {
+        "aws": {
+            "enabled": False,
+            "access_key_id": "",
+            "secret_access_key": "",
+            "region": "us-east-1"
+        },
+        "cloudflare": {
+            "enabled": False,
+            "api_token": "",
+            "zone_id": ""
+        }
+    },
+    "private_ca": {
+        "enabled": False,
+        "key_storage_dir": str(project_root / "ca_keys"),
+        "default_key_type": "rsa",
+        "default_key_size": 4096
+    },
+    "oauth2": {
+        "client_id": "",
+        "client_secret": "",
+        "redirect_uri": "http://localhost:5000/auth/callback",
+        "authorization_url": "",
+        "token_url": ""
+    },
+    "web": {
+        "host": "0.0.0.0",
+        "port": 5000,
+        "debug": False,
+        "secret_key": os.urandom(32).hex()
+    },
+    "directories": {
+        "certificates": str(project_root / "certificates"),
+        "cache": str(project_root / "cache"),
+        "logs": str(project_root / "logs")
+    },
+    "notification_days": [120, 90, 60, 30, 15, 5, 2, 1]
+}
 
 
-def create_config_if_not_exists():
-    """Create configuration file from example if it doesn't exist."""
+def ensure_config() -> dict:
+    """Load config.json, creating it from defaults if it does not exist."""
     config_file = project_root / "config" / "config.json"
-    example_file = project_root / "config" / "config.example.json"
-    
-    if not config_file.exists() and example_file.exists():
-        print("Creating config.json from example...")
-        with open(example_file) as f:
-            config = json.load(f)
-        
-        # Set default SQLite database path
-        config['database']['name'] = str(project_root / "sslmgr.db")
-        
-        with open(config_file, 'w') as f:
-            json.dump(config, f, indent=2)
-        
-        print(f"✓ Configuration created at {config_file}")
-        print("Please review and update the configuration as needed.")
-        return config
-    elif config_file.exists():
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if config_file.exists():
         with open(config_file) as f:
-            return json.load(f)
-    else:
-        print("Error: No configuration file found and no example to copy from")
-        sys.exit(1)
+            cfg = json.load(f)
+        print(f"✓ Using existing config: {config_file}")
+        return cfg
+
+    # Write defaults
+    with open(config_file, 'w') as f:
+        json.dump(DEFAULT_CONFIG, f, indent=2)
+
+    print(f"✓ Default config written to {config_file}")
+    print("  → Review and update credentials before going to production.")
+    return DEFAULT_CONFIG
 
 
-def setup_database(config):
-    """Initialize the database with required tables."""
-    print("Setting up database...")
-    
-    try:
-        db_manager = DatabaseManager(get_database_url(config))
-        db_manager.create_tables()
-        print("✓ Database tables created successfully")
-        
-        # Test database connection
-        session = db_manager.get_session()
-        session.close()
-        print("✓ Database connection test successful")
-        
-    except Exception as e:
-        print(f"✗ Database setup failed: {e}")
-        sys.exit(1)
+def setup_database(config: dict) -> None:
+    """Create all SQLAlchemy-managed tables (idempotent)."""
+    print("Setting up database …")
+    from database.models import DatabaseManager, get_database_url
+    db  = DatabaseManager(get_database_url(config))
+    db.create_tables()
+    sess = db.get_session()
+    sess.close()
+    print("✓ Database tables created / verified")
 
 
-def create_directories(config):
-    """Create required directories."""
-    print("Creating required directories...")
-    
-    directories = [
-        config.get('directories', {}).get('cache', './cache'),
-        config.get('directories', {}).get('logs', './logs'),
-        './temp'
+def create_directories(config: dict) -> None:
+    """Create required runtime directories."""
+    dirs = [
+        config.get('directories', {}).get('certificates', './certificates'),
+        config.get('directories', {}).get('cache',        './cache'),
+        config.get('directories', {}).get('logs',         './logs'),
+        config.get('private_ca', {}).get('key_storage_dir', './ca_keys'),
+        project_root / 'temp',
     ]
-    
-    for directory in directories:
-        dir_path = Path(directory)
-        if not dir_path.is_absolute():
-            dir_path = project_root / directory
-        
-        dir_path.mkdir(parents=True, exist_ok=True)
-        print(f"✓ Created directory: {dir_path}")
+    for d in dirs:
+        p = Path(d)
+        if not p.is_absolute():
+            p = project_root / p
+        p.mkdir(parents=True, exist_ok=True)
+        print(f"✓ Directory ready: {p}")
 
 
-def make_scripts_executable():
-    """Make CLI scripts executable."""
-    print("Making scripts executable...")
-    
-    scripts = [
-        project_root / "cli" / "ssl_manager.py",
-        project_root / "cli" / "ssl_manager.php",
-        project_root / "scripts" / "send_notifications.py"
-    ]
-    
-    for script in scripts:
-        if script.exists():
-            script.chmod(0o755)
-            print(f"✓ Made executable: {script}")
+def check_encryption_key() -> None:
+    """Warn if SSLMGR_ENCRYPTION_KEY is not set (needed for secret storage)."""
+    if not os.environ.get('SSLMGR_ENCRYPTION_KEY'):
+        print()
+        print("⚠  SSLMGR_ENCRYPTION_KEY is not set.")
+        print("   Generate one and add it to your environment:")
+        print("   python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"")
+        print("   export SSLMGR_ENCRYPTION_KEY=<the key above>")
 
 
-def test_dependencies():
-    """Test that required dependencies are available."""
-    print("Testing dependencies...")
-    
-    # Test Python dependencies
-    python_deps = [
-        'cryptography',
-        'sqlalchemy',
-        'click',
-        'requests',
-        'jinja2'
-    ]
-    
-    missing_deps = []
-    for dep in python_deps:
-        try:
-            __import__(dep)
-        except ImportError:
-            missing_deps.append(dep)
-    
-    if missing_deps:
-        print(f"✗ Missing Python dependencies: {', '.join(missing_deps)}")
-        print("Please run: pip install -r requirements.txt")
+def check_dependencies() -> bool:
+    """Verify required Python packages are importable."""
+    required = ['cryptography', 'sqlalchemy', 'flask', 'click', 'requests', 'jinja2']
+    missing  = [p for p in required if not _importable(p)]
+    if missing:
+        print(f"✗ Missing packages: {', '.join(missing)}")
+        print("  Run: pip install -r requirements.txt")
         return False
-    else:
-        print("✓ All Python dependencies available")
-    
-    # Test OpenSSL
-    try:
-        import OpenSSL
-        print("✓ pyOpenSSL available")
-    except ImportError:
-        print("✗ pyOpenSSL not available")
-        return False
-    
+    print("✓ Core dependencies present")
     return True
 
 
-def show_next_steps():
-    """Show next steps to the user."""
-    print("\n" + "="*60)
-    print("SSL Certificate Manager Setup Complete!")
-    print("="*60)
-    
-    print("\nNext Steps:")
-    print("1. Review and update config/config.json with your settings")
-    print("2. Configure email settings for notifications")
-    print("3. Set up CA API credentials (Let's Encrypt, DigiCert, etc.)")
-    print("4. Test the system:")
-    print("   python cli/ssl_manager.py config test")
-    print("5. Scan your first directory:")
-    print("   python cli/ssl_manager.py scan directory /path/to/certificates")
-    print("6. Set up notification cron jobs:")
-    print("   python cli/ssl_manager.py notify setup")
-    
-    print("\nUseful Commands:")
-    print("- List certificates: python cli/ssl_manager.py list certificates")
-    print("- Show statistics: python cli/ssl_manager.py list statistics")
-    print("- Test notifications: python cli/ssl_manager.py notify test")
-    print("- Renew certificate: python cli/ssl_manager.py renew certificate <id>")
-    
-    print("\nPHP CLI (if using PHP):")
-    print("- Install dependencies: composer install")
-    print("- List certificates: php cli/ssl_manager.php list")
-    print("- Show statistics: php cli/ssl_manager.php stats")
+def _importable(name: str) -> bool:
+    try:
+        __import__(name)
+        return True
+    except ImportError:
+        return False
 
 
-def main():
-    """Main setup function."""
-    print("SSL Certificate Manager Setup")
+def make_scripts_executable() -> None:
+    for rel in ('cli/ssl_manager.py', 'scripts/send_notifications.py'):
+        p = project_root / rel
+        if p.exists():
+            p.chmod(0o755)
+            print(f"✓ chmod +x {p.name}")
+
+
+def show_next_steps() -> None:
+    print()
+    print("=" * 60)
+    print("Setup complete!")
+    print("=" * 60)
+    print()
+    print("Next steps:")
+    print("1. Set SSLMGR_ENCRYPTION_KEY in your environment (see above)")
+    print("2. Edit config/config.json — fill in credentials")
+    print("3. Test:  python test_startup.py")
+    print("4. Start: python start_web_server.py")
+    print()
+    print("Private CA quick-start:")
+    print("  from ca import PrivateCAManager, CertificateType")
+    print("  mgr  = PrivateCAManager()")
+    print("  root = mgr.create_root_ca('My Root CA', organization='Acme', country='US')")
+    print("  cert = mgr.issue_certificate('app.example.com', root['cert_pem'], root['key_pem'])")
+
+
+def main() -> None:
+    print("SSL Certificate Manager — Setup")
     print("=" * 40)
-    
-    # Test dependencies first
-    if not test_dependencies():
-        print("\nPlease install missing dependencies and run setup again.")
+
+    if not check_dependencies():
         sys.exit(1)
-    
-    # Create configuration
-    config = create_config_if_not_exists()
-    
-    # Setup database
+
+    config = ensure_config()
     setup_database(config)
-    
-    # Create directories
     create_directories(config)
-    
-    # Make scripts executable
     make_scripts_executable()
-    
-    # Show next steps
+    check_encryption_key()
     show_next_steps()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

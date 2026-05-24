@@ -17,8 +17,7 @@ def test_imports():
     try:
         print("Testing imports...")
 
-        sys.path.insert(0, str(project_root / "'"))
-        from certificate_manager import CertificateManager
+        from core.certificate_manager import CertificateManager
         print("✓ CertificateManager imported successfully")
 
         from database.models import DatabaseManager
@@ -64,8 +63,7 @@ def test_certificate_manager():
     try:
         print("\nTesting certificate manager...")
 
-        sys.path.insert(0, str(project_root / "'"))
-        from certificate_manager import CertificateManager
+        from core.certificate_manager import CertificateManager
 
         # Initialize with test database
         config = {

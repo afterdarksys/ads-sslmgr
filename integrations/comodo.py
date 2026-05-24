@@ -1,365 +1,362 @@
 """
-Comodo/Sectigo API integration for certificate management
+Sectigo (formerly Comodo CA) Certificate Manager (SCM) API integration.
+Supports: enroll, renew, collect, revoke, list — for both SSL and client certs.
+
+Auth: Sectigo SCM uses HTTP Basic-style headers:
+    login       — customer login (email)
+    password    — customer password or API password
+    customerUri — your SCM organisation URI (e.g. 'mycompany')
+
+Set these in config.certificate_authorities.sectigo (or comodo) section.
 """
 
-import requests
-import json
+import time
+import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional
+
+import requests
 
 from database.models import Certificate, RenewalAttempt, DatabaseManager
 
+log = logging.getLogger(__name__)
+
+_BASE_URL       = 'https://cert-manager.com/api'
+_RETRY_STATUSES = {429, 500, 502, 503, 504}
+_MAX_RETRIES    = 4
+_POLL_INTERVAL  = 15   # seconds
+_POLL_TIMEOUT   = 600  # seconds
+
+# Sectigo cert type IDs (serverType parameter)
+SERVER_TYPES = {
+    'server':        -1,   # auto-detect
+    'apache':         2,
+    'iis':            1,
+    'nginx':         14,
+    'other':         -1,
+}
+
+# Term values in days → Sectigo 'term' field (days)
+TERMS = {1: 365, 2: 730, 3: 1095}
+
 
 class ComodoIntegration:
-    """Handle Comodo/Sectigo API operations for certificate management."""
-    
+    """Sectigo SCM API integration (replaces legacy Comodo integration)."""
+
     def __init__(self, config: dict, db_manager: DatabaseManager):
-        self.config = config
+        self.config     = config
         self.db_manager = db_manager
-        self.comodo_config = config.get('certificate_authorities', {}).get('comodo', {})
-        
-        self.enabled = self.comodo_config.get('enabled', False)
-        self.api_key = self.comodo_config.get('api_key', '')
-        self.customer_uri = self.comodo_config.get('customer_uri', '')
-        
-        # API configuration
-        self.base_url = 'https://hard.cert-manager.com/api'
-        self.headers = {
-            'Content-Type': 'application/json',
-            'customerUri': self.customer_uri
+
+        # Support both 'sectigo' and legacy 'comodo' config keys
+        ca_cfg = (config.get('certificate_authorities', {}).get('sectigo')
+                  or config.get('certificate_authorities', {}).get('comodo', {}))
+
+        self.enabled      = ca_cfg.get('enabled', False)
+        self.login        = ca_cfg.get('login', '')
+        self.password     = ca_cfg.get('password', '')
+        self.customer_uri = ca_cfg.get('customer_uri', '')
+        self.org_id       = ca_cfg.get('org_id', '')
+        self.base_url     = ca_cfg.get('base_url', _BASE_URL)
+        self.cert_dir     = Path(config.get('directories', {}).get('certificates', './certificates'))
+        self.cert_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Public API ──────────────────────────────────────────────────────────
+
+    def enroll_certificate(
+        self,
+        common_name: str,
+        san_domains: List[str] = None,
+        cert_type_id: int = 224,   # 224 = OV SSL; 283 = DV SSL — confirm with your account
+        validity_days: int = 365,
+        server_type: str = 'other',
+        org_id: int = None,
+        extra_fields: Dict = None,
+    ) -> Dict:
+        """
+        Enroll a new SSL certificate.
+        Returns ssl_id immediately; call poll_for_certificate(ssl_id) to get the PEM.
+        """
+        if not self._check_ready():
+            return self._disabled_error()
+
+        csr_result  = self._generate_csr(common_name, san_domains or [])
+        san_str     = ','.join(san_domains) if san_domains else ''
+        oid         = org_id or (int(self.org_id) if self.org_id else None)
+        svr_type    = SERVER_TYPES.get(server_type, -1)
+        term        = min(validity_days, 825)   # CA/B Forum max
+
+        payload = {
+            'orgId':      oid,
+            'csr':        csr_result['csr_pem'],
+            'subjAltNames': san_str,
+            'certType':   cert_type_id,
+            'numberServers': 1,
+            'serverType': svr_type,
+            'term':       term,
+            'comments':   f'Enrolled via SSL Manager — {datetime.utcnow().isoformat()}',
         }
-    
+        if extra_fields:
+            payload.update(extra_fields)
+
+        resp = self._request('POST', '/ssl/v1/enroll', json=payload)
+        if not resp['success']:
+            return resp
+
+        ssl_id = resp['data'].get('sslId') or resp['data'].get('id')
+        return {
+            'success':  True,
+            'ssl_id':   ssl_id,
+            'csr_pem':  csr_result['csr_pem'],
+            'key_pem':  csr_result['key_pem'],
+            'message':  f'Enrollment submitted, ssl_id={ssl_id}',
+        }
+
+    def poll_for_certificate(self, ssl_id: int, timeout: int = _POLL_TIMEOUT) -> Dict:
+        """
+        Poll until the certificate is issued, then collect and return it.
+        Sectigo status codes: 0=requested, 1=approved, 2=issued, -1=revoked, etc.
+        """
+        if not self._check_ready():
+            return self._disabled_error()
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            detail = self._request('GET', f'/ssl/v1/{ssl_id}')
+            if not detail['success']:
+                return detail
+
+            data   = detail['data']
+            status = data.get('status', 0)
+
+            if status == 2:   # issued
+                return self.collect_certificate(ssl_id)
+            if status < 0:    # revoked / rejected
+                return {'success': False, 'error': f'ssl_id={ssl_id} has status {status} (rejected/revoked)'}
+
+            log.debug(f'Sectigo ssl_id={ssl_id} status={status}, sleeping {_POLL_INTERVAL}s')
+            time.sleep(_POLL_INTERVAL)
+
+        return {'success': False, 'error': f'Timed out waiting for ssl_id={ssl_id} after {timeout}s'}
+
+    def collect_certificate(self, ssl_id: int, format_type: str = 'x509CO') -> Dict:
+        """
+        Collect (download) an issued certificate.
+        format_type: x509   = leaf only
+                     x509CO = leaf + intermediates (default)
+                     x509IOR = reverse chain
+                     base64  = PKCS#7 base64
+        """
+        resp = self._request('GET', f'/ssl/v1/collect/{ssl_id}/{format_type}')
+        if not resp['success']:
+            return resp
+
+        pem_data = resp['data']
+        if isinstance(pem_data, dict):
+            pem_data = pem_data.get('certificate', '')
+
+        # Split leaf from chain
+        blocks    = pem_data.split('-----END CERTIFICATE-----')
+        cert_pem  = (blocks[0] + '-----END CERTIFICATE-----\n').strip() if blocks else pem_data
+        chain_pem = ('-----END CERTIFICATE-----\n'.join(blocks[1:]) + '-----END CERTIFICATE-----\n').strip() \
+                    if len(blocks) > 1 else ''
+
+        cert_file = self.cert_dir / f'sectigo_{ssl_id}.pem'
+        cert_file.write_text(cert_pem)
+
+        expiry = None
+        try:
+            from cryptography import x509 as cx509
+            from datetime import timezone
+            c      = cx509.load_pem_x509_certificate(cert_pem.encode())
+            expiry = (c.not_valid_after_utc if hasattr(c, 'not_valid_after_utc')
+                      else c.not_valid_after.replace(tzinfo=timezone.utc))
+        except Exception:
+            pass
+
+        return {
+            'success':     True,
+            'ssl_id':      ssl_id,
+            'cert_pem':    cert_pem,
+            'chain_pem':   chain_pem,
+            'cert_path':   str(cert_file),
+            'expiry_date': expiry,
+            'message':     f'Certificate ssl_id={ssl_id} collected successfully',
+        }
+
     def renew_certificate(self, cert: Certificate, domains: List[str] = None) -> Dict:
-        """
-        Renew a certificate using Comodo API.
-        
-        Args:
-            cert: Certificate object to renew
-            domains: List of domains to include in certificate
-            
-        Returns:
-            Dictionary with renewal results
-        """
-        if not self.enabled:
-            return {
-                'success': False,
-                'error': 'Comodo integration is disabled'
-            }
-        
-        if not self.api_key or not self.customer_uri:
-            return {
-                'success': False,
-                'error': 'Comodo API credentials not configured'
-            }
-        
+        """Renew by re-enrolling; Sectigo SCM does not have a true duplicate endpoint."""
+        if not self._check_ready():
+            return self._disabled_error()
+
         session = self.db_manager.get_session()
-        
-        # Create renewal attempt record
         attempt = RenewalAttempt(
             certificate_id=cert.id,
-            ca_provider='comodo',
+            ca_provider='sectigo',
             renewal_method='api',
-            status='pending'
+            status='pending',
         )
         session.add(attempt)
         session.commit()
-        
+
         try:
-            # Find the original certificate in Comodo
-            cert_info = self._find_certificate(cert)
-            if not cert_info['success']:
-                raise Exception(f"Could not find Comodo certificate: {cert_info['error']}")
-            
-            # Renew the certificate
-            renewal_result = self._renew_certificate_api(cert_info['certificate_id'], domains)
-            
-            if renewal_result['success']:
-                attempt.status = 'success'
-                attempt.new_certificate_path = renewal_result.get('certificate_path', '')
-                attempt.new_expiry_date = renewal_result.get('expiry_date')
-            else:
-                attempt.status = 'failed'
-                attempt.error_message = renewal_result.get('error', 'Unknown error')
-            
+            result = self._do_renewal(cert, domains)
+            attempt.status               = 'success' if result['success'] else 'failed'
+            attempt.error_message        = result.get('error') if not result['success'] else None
+            attempt.new_expiry_date      = result.get('expiry_date')
+            attempt.new_certificate_path = result.get('cert_path', '')
             session.commit()
-            return renewal_result
-            
-        except Exception as e:
-            attempt.status = 'failed'
-            attempt.error_message = str(e)
+            return result
+        except Exception as exc:
+            attempt.status        = 'failed'
+            attempt.error_message = str(exc)
             session.commit()
-            
-            return {
-                'success': False,
-                'error': str(e)
-            }
-        
+            return {'success': False, 'error': str(exc)}
         finally:
             session.close()
-    
-    def _find_certificate(self, cert: Certificate) -> Dict:
-        """Find the Comodo certificate ID by serial number."""
-        try:
-            url = f"{self.base_url}/ssl/v1/list"
-            params = {
-                'customerUri': self.customer_uri,
-                'serialNumber': cert.serial_number
-            }
-            
-            response = requests.get(url, headers=self.headers, params=params, 
-                                  auth=(self.api_key, ''))
-            
-            if response.status_code == 200:
-                data = response.json()
-                certificates = data.get('certificates', [])
-                
-                if certificates:
-                    return {
-                        'success': True,
-                        'certificate_id': certificates[0]['id'],
-                        'certificate_data': certificates[0]
-                    }
-                else:
-                    return {
-                        'success': False,
-                        'error': 'No matching certificates found'
-                    }
-            else:
-                return {
-                    'success': False,
-                    'error': f'API request failed: {response.status_code} - {response.text}'
-                }
-                
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def _renew_certificate_api(self, certificate_id: str, domains: List[str] = None) -> Dict:
-        """Renew certificate using Comodo API."""
-        try:
-            url = f"{self.base_url}/ssl/v1/renew"
-            
-            # Get original certificate details
-            cert_details = self._get_certificate_details(certificate_id)
-            if not cert_details['success']:
-                return cert_details
-            
-            original_cert = cert_details['certificate']
-            
-            # Prepare renewal data
-            renewal_data = {
-                'customerUri': self.customer_uri,
-                'certificateId': certificate_id,
-                'csr': self._generate_csr(original_cert['commonName'], domains or []),
-                'term': original_cert.get('term', 365),  # Certificate validity period
-                'serverType': original_cert.get('serverType', -1),  # Server type ID
-                'comments': f'Automated renewal - {datetime.utcnow().isoformat()}'
-            }
-            
-            response = requests.post(url, headers=self.headers, json=renewal_data,
-                                   auth=(self.api_key, ''))
-            
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    'success': True,
-                    'renewal_id': data.get('renewalId'),
-                    'message': 'Certificate renewal initiated'
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Renewal failed: {response.status_code} - {response.text}'
-                }
-                
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def _get_certificate_details(self, certificate_id: str) -> Dict:
-        """Get details of a Comodo certificate."""
-        try:
-            url = f"{self.base_url}/ssl/v1/{certificate_id}"
-            params = {'customerUri': self.customer_uri}
-            
-            response = requests.get(url, headers=self.headers, params=params,
-                                  auth=(self.api_key, ''))
-            
-            if response.status_code == 200:
-                return {
-                    'success': True,
-                    'certificate': response.json()
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Failed to get certificate details: {response.status_code}'
-                }
-                
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def _generate_csr(self, common_name: str, san_domains: List[str]) -> str:
-        """Generate a Certificate Signing Request."""
-        # This is a placeholder - in production you'd generate a proper CSR
-        # using cryptography library with private key generation
-        return f"-----BEGIN CERTIFICATE REQUEST-----\n[CSR for {common_name}]\n-----END CERTIFICATE REQUEST-----"
-    
-    def list_certificates(self, limit: int = 100) -> Dict:
-        """List Comodo certificates."""
-        try:
-            url = f"{self.base_url}/ssl/v1/list"
-            params = {
-                'customerUri': self.customer_uri,
-                'size': limit
-            }
-            
-            response = requests.get(url, headers=self.headers, params=params,
-                                  auth=(self.api_key, ''))
-            
-            if response.status_code == 200:
-                return {
-                    'success': True,
-                    'certificates': response.json()
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Failed to list certificates: {response.status_code}'
-                }
-                
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
+
+    def revoke_certificate_api(self, ssl_id: int, reason: str = 'Superseded') -> Dict:
+        payload = {'sslId': ssl_id, 'reason': reason}
+        return self._request('POST', '/ssl/v1/revoke', json=payload)
+
+    def list_certificates(self, size: int = 100, position: int = 0, status: int = None) -> Dict:
+        params = {'size': size, 'position': position}
+        if status is not None:
+            params['status'] = status
+        return self._request('GET', '/ssl/v1', params=params)
+
+    def get_certificate_details(self, ssl_id: int) -> Dict:
+        return self._request('GET', f'/ssl/v1/{ssl_id}')
+
     def get_account_info(self) -> Dict:
-        """Get Comodo account information."""
-        try:
-            url = f"{self.base_url}/account/v1/info"
-            params = {'customerUri': self.customer_uri}
-            
-            response = requests.get(url, headers=self.headers, params=params,
-                                  auth=(self.api_key, ''))
-            
-            if response.status_code == 200:
-                return {
-                    'success': True,
-                    'account': response.json()
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Failed to get account info: {response.status_code}'
-                }
-                
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
-    def download_certificate(self, certificate_id: str, format_type: str = 'x509') -> Dict:
-        """Download certificate in specified format."""
-        try:
-            url = f"{self.base_url}/ssl/v1/collect/{certificate_id}/{format_type}"
-            params = {'customerUri': self.customer_uri}
-            
-            response = requests.get(url, headers=self.headers, params=params,
-                                  auth=(self.api_key, ''))
-            
-            if response.status_code == 200:
-                return {
-                    'success': True,
-                    'certificate_data': response.text,
-                    'format': format_type
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Failed to download certificate: {response.status_code}'
-                }
-                
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e)
-            }
-    
+        return self._request('GET', '/account/v1/info')
+
     def check_renewal_eligibility(self, cert: Certificate) -> Dict:
-        """Check if a certificate is eligible for Comodo renewal."""
-        
-        # Check if certificate was issued by Comodo
-        if cert.issuer_category not in ['comodo', 'sectigo']:
-            return {
-                'eligible': False,
-                'reason': 'Certificate was not issued by Comodo/Sectigo'
-            }
-        
-        # Check API configuration
-        if not self.api_key or not self.customer_uri:
-            return {
-                'eligible': False,
-                'reason': 'Comodo API credentials not configured'
-            }
-        
-        # Check if certificate is expiring soon
-        days_until_expiry = cert.days_until_expiry
-        if days_until_expiry > 90:
-            return {
-                'eligible': False,
-                'reason': f'Certificate expires in {days_until_expiry} days (renewal recommended at 90 days)'
-            }
-        
-        return {
-            'eligible': True,
-            'days_until_expiry': days_until_expiry,
-            'serial_number': cert.serial_number
-        }
-    
+        if cert.issuer_category not in ('sectigo', 'comodo'):
+            return {'eligible': False, 'reason': 'Not a Sectigo/Comodo certificate'}
+        if not self.login or not self.password or not self.customer_uri:
+            return {'eligible': False, 'reason': 'Sectigo credentials not fully configured'}
+        if cert.days_until_expiry > 90:
+            return {'eligible': False,
+                    'reason': f'Expires in {cert.days_until_expiry}d (renew within 90 days)'}
+        return {'eligible': True, 'days_until_expiry': cert.days_until_expiry,
+                'serial_number': cert.serial_number}
+
     def test_configuration(self) -> Dict:
-        """Test Comodo API configuration."""
-        tests = {
-            'api_key_configured': bool(self.api_key),
+        tests  = {
+            'login_configured':        bool(self.login),
+            'password_configured':     bool(self.password),
             'customer_uri_configured': bool(self.customer_uri),
-            'api_accessible': False,
-            'account_valid': False
+            'api_accessible':          False,
+            'account_valid':           False,
         }
-        
         errors = []
-        
-        if not self.api_key:
-            errors.append("Comodo API key not configured")
-        
-        if not self.customer_uri:
-            errors.append("Comodo customer URI not configured")
-        
-        if self.api_key and self.customer_uri:
-            # Test API access
-            try:
-                account_info = self.get_account_info()
-                
-                if account_info['success']:
-                    tests['api_accessible'] = True
-                    tests['account_valid'] = True
-                else:
-                    tests['api_accessible'] = True
-                    errors.append(f"Account validation failed: {account_info['error']}")
-                    
-            except Exception as e:
-                errors.append(f"API connection failed: {e}")
-        
-        return {
-            'enabled': self.enabled,
-            'tests': tests,
-            'errors': errors,
-            'all_tests_passed': len(errors) == 0
+        for field, name in [
+            (self.login,        'login'),
+            (self.password,     'password'),
+            (self.customer_uri, 'customer_uri'),
+        ]:
+            if not field:
+                errors.append(f'{name} not configured')
+
+        if not errors:
+            r = self.get_account_info()
+            if r['success']:
+                tests['api_accessible'] = True
+                tests['account_valid']  = True
+            else:
+                tests['api_accessible'] = True
+                errors.append(f"Account validation failed: {r.get('error')}")
+
+        return {'enabled': self.enabled, 'tests': tests, 'errors': errors,
+                'all_tests_passed': not errors}
+
+    # ── Internal helpers ────────────────────────────────────────────────────
+
+    def _do_renewal(self, cert: Certificate, domains: List[str]) -> Dict:
+        if not domains:
+            domains = self._cert_domains(cert)
+
+        enroll = self.enroll_certificate(
+            common_name=cert.common_name,
+            san_domains=domains,
+        )
+        if not enroll['success']:
+            return enroll
+
+        result          = self.poll_for_certificate(enroll['ssl_id'])
+        result['key_pem'] = enroll.get('key_pem')
+        return result
+
+    def _generate_csr(self, common_name: str, san_domains: List[str]) -> Dict:
+        import sys, pathlib
+        sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+        from ca.private_ca import PrivateCAManager
+        mgr = PrivateCAManager(self.cert_dir / 'keys')
+        return mgr.generate_csr(
+            common_name=common_name,
+            key_type='rsa',
+            key_size_or_curve=2048,
+            san_dns=san_domains or [],
+        )
+
+    def _request(self, method: str, path: str, **kwargs) -> Dict:
+        """HTTP request with Sectigo header auth and exponential-backoff retry."""
+        url     = self.base_url.rstrip('/') + path
+        headers = {
+            'Content-Type': 'application/json',
+            'login':        self.login,
+            'password':     self.password,
+            'customerUri':  self.customer_uri,
         }
+
+        for attempt in range(_MAX_RETRIES):
+            try:
+                resp = requests.request(method, url, headers=headers, timeout=30, **kwargs)
+                if resp.status_code in _RETRY_STATUSES and attempt < _MAX_RETRIES - 1:
+                    wait = 2 ** attempt
+                    log.warning(f'Sectigo {method} {path} → {resp.status_code}, retry in {wait}s')
+                    time.sleep(wait)
+                    continue
+                if resp.status_code == 400:
+                    # Sectigo returns 400 with a JSON error body
+                    try:
+                        err = resp.json()
+                    except ValueError:
+                        err = resp.text
+                    return {'success': False, 'error': str(err), 'status_code': 400}
+                if resp.status_code >= 400:
+                    return {'success': False,
+                            'error':   f'HTTP {resp.status_code}: {resp.text[:500]}',
+                            'status_code': resp.status_code}
+                try:
+                    data = resp.json()
+                except ValueError:
+                    data = resp.text
+                return {'success': True, 'data': data, 'status_code': resp.status_code}
+            except requests.RequestException as exc:
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                return {'success': False, 'error': str(exc)}
+
+        return {'success': False, 'error': 'Max retries exceeded'}
+
+    def _check_ready(self) -> bool:
+        return self.enabled and bool(self.login) and bool(self.password) and bool(self.customer_uri)
+
+    def _disabled_error(self) -> Dict:
+        if not self.enabled:
+            return {'success': False, 'error': 'Sectigo integration is disabled'}
+        return {'success': False, 'error': 'Sectigo credentials (login/password/customer_uri) not fully configured'}
+
+    def _cert_domains(self, cert: Certificate) -> List[str]:
+        domains = []
+        if cert.common_name:
+            domains.append(cert.common_name)
+        for san in (cert.subject_alt_names or []):
+            if san.startswith('DNS:'):
+                d = san[4:]
+                if d not in domains:
+                    domains.append(d)
+        return domains

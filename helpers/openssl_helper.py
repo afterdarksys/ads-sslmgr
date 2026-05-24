@@ -63,7 +63,8 @@ class OpenSSLHelper:
 
     def check_private_key_match(self, cert_path: str, key_path: str) -> bool:
         """
-        Check if private key matches certificate
+        Check if private key matches certificate.
+        Handles both RSA (modulus comparison) and EC (public-key hash comparison).
 
         Args:
             cert_path: Path to certificate file
@@ -73,26 +74,37 @@ class OpenSSLHelper:
             True if key matches certificate
         """
         try:
-            # Get certificate modulus
-            cert_cmd = [self.openssl_path, 'x509', '-noout', '-modulus', '-in', cert_path]
-            cert_result = subprocess.run(cert_cmd, capture_output=True, text=True, timeout=10)
+            # Detect key type from the certificate's public key
+            pubkey_cmd = [self.openssl_path, 'x509', '-noout', '-text', '-in', cert_path]
+            pubkey_result = subprocess.run(pubkey_cmd, capture_output=True, text=True, timeout=10)
+            is_ec = 'EC Public Key' in pubkey_result.stdout or 'id-ecPublicKey' in pubkey_result.stdout
 
-            if cert_result.returncode != 0:
-                return False
+            if is_ec:
+                # EC: compare the public key derived from the cert and the key file
+                cert_pub_cmd = [self.openssl_path, 'x509', '-noout', '-pubkey', '-in', cert_path]
+                cert_pub = subprocess.run(cert_pub_cmd, capture_output=True, text=True, timeout=10)
+                if cert_pub.returncode != 0:
+                    return False
 
-            cert_modulus = cert_result.stdout.strip()
+                key_pub_cmd = [self.openssl_path, 'ec', '-pubout', '-in', key_path]
+                key_pub = subprocess.run(key_pub_cmd, capture_output=True, text=True, timeout=10)
+                if key_pub.returncode != 0:
+                    return False
 
-            # Get key modulus
-            key_cmd = [self.openssl_path, 'rsa', '-noout', '-modulus', '-in', key_path]
-            key_result = subprocess.run(key_cmd, capture_output=True, text=True, timeout=10)
+                return cert_pub.stdout.strip() == key_pub.stdout.strip()
+            else:
+                # RSA: compare moduli
+                cert_cmd = [self.openssl_path, 'x509', '-noout', '-modulus', '-in', cert_path]
+                cert_result = subprocess.run(cert_cmd, capture_output=True, text=True, timeout=10)
+                if cert_result.returncode != 0:
+                    return False
 
-            if key_result.returncode != 0:
-                return False
+                key_cmd = [self.openssl_path, 'rsa', '-noout', '-modulus', '-in', key_path]
+                key_result = subprocess.run(key_cmd, capture_output=True, text=True, timeout=10)
+                if key_result.returncode != 0:
+                    return False
 
-            key_modulus = key_result.stdout.strip()
-
-            # Compare moduli
-            return cert_modulus == key_modulus
+                return cert_result.stdout.strip() == key_result.stdout.strip()
 
         except Exception as e:
             self.logger.error(f"Error checking key match: {e}")

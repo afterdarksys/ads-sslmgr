@@ -410,30 +410,70 @@ class CertificateValidator:
         return findings
 
     def _validate_transparency(self, cert_data: Dict) -> List[Dict]:
-        """Validate Certificate Transparency compliance"""
-        findings = []
-
-        # Check for CT poison extension (should not be present in production)
-        # Check for SCT (Signed Certificate Timestamp)
-        # This would require actual certificate object
-
-        # Placeholder
-        has_sct = False
+        """Validate Certificate Transparency compliance using Chrome CT policy."""
+        from helpers.ct_utils import verify_ct_compliance
 
         issuer_category = cert_data.get('issuer_category', '')
-        if issuer_category in ['letsencrypt', 'digicert', 'comodo', 'sectigo']:
-            if not has_sct:
-                findings.append({
-                    'category': ValidationCategory.TRANSPARENCY.value,
-                    'severity': ValidationSeverity.LOW.value,
-                    'code': 'NO_SCT',
-                    'title': 'No Certificate Transparency Log',
-                    'description': 'Certificate does not include SCT (Signed Certificate Timestamp)',
-                    'impact': 'Certificate may not comply with CT requirements',
-                    'remediation': 'Ensure certificates are logged in CT logs'
-                })
+        cert_pem = cert_data.get('cert_pem')
 
-        return findings
+        result = verify_ct_compliance(cert_pem=cert_pem, issuer_category=issuer_category)
+
+        status = result.get('status', '')
+        severity_map = {
+            'HIGH': ValidationSeverity.HIGH.value,
+            'MEDIUM': ValidationSeverity.MEDIUM.value,
+            'INFO': ValidationSeverity.INFO.value,
+            'LOW': ValidationSeverity.LOW.value,
+        }
+
+        if status == 'CT_EXEMPT':
+            return []  # Private/internal CAs are not required to have CT
+
+        if status == 'CT_COMPLIANT':
+            return [{
+                'category': ValidationCategory.TRANSPARENCY.value,
+                'severity': ValidationSeverity.INFO.value,
+                'code': 'CT_COMPLIANT',
+                'title': 'Certificate Transparency Compliant',
+                'description': result.get('message', ''),
+                'impact': 'None',
+                'remediation': 'N/A',
+            }]
+
+        if status == 'CT_UNVERIFIABLE':
+            return [{
+                'category': ValidationCategory.TRANSPARENCY.value,
+                'severity': ValidationSeverity.INFO.value,
+                'code': 'CT_UNVERIFIABLE',
+                'title': 'CT Compliance Unverifiable',
+                'description': result.get('message', ''),
+                'impact': 'Unable to confirm CT compliance without certificate PEM',
+                'remediation': 'Ensure certificate PEM is available for validation',
+            }]
+
+        if status == 'NO_SCT':
+            return [{
+                'category': ValidationCategory.TRANSPARENCY.value,
+                'severity': ValidationSeverity.HIGH.value,
+                'code': 'NO_SCT',
+                'title': 'No Signed Certificate Timestamps',
+                'description': result.get('message', ''),
+                'impact': 'Certificate may be rejected by Chrome and other CT-enforcing clients',
+                'remediation': 'Obtain certificate from a CA that embeds SCTs',
+            }]
+
+        if status == 'INSUFFICIENT_SCTS':
+            return [{
+                'category': ValidationCategory.TRANSPARENCY.value,
+                'severity': ValidationSeverity.MEDIUM.value,
+                'code': 'INSUFFICIENT_SCTS',
+                'title': 'Insufficient Signed Certificate Timestamps',
+                'description': result.get('message', ''),
+                'impact': 'Certificate may not meet Chrome CT policy requirements',
+                'remediation': 'Ensure certificate has the required number of SCTs',
+            }]
+
+        return []
 
     def _calculate_status(self, findings: List[Dict]) -> Tuple[str, int]:
         """Calculate overall validation status and risk score"""

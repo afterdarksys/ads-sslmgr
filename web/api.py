@@ -13,13 +13,15 @@ from typing import Dict, List, Optional
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "'"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth.oauth2_handler import OAuth2Handler
-from certificate_manager import CertificateManager
-from renewal_router import RenewalRouter
+from core.certificate_manager import CertificateManager
+from core.renewal_router import RenewalRouter
 from notifications.email_notifier import EmailNotifier
 from notifications.snmp_notifier import SNMPNotifier
+from ca.ca_manager import CAManager
+from database.models import DatabaseManager, get_database_url
 
 
 class SSLManagerAPI:
@@ -40,7 +42,9 @@ class SSLManagerAPI:
         self.renewal_router = RenewalRouter(self.config, self.cert_manager.db_manager)
         self.email_notifier = EmailNotifier(self.config, self.cert_manager.db_manager)
         self.snmp_notifier = SNMPNotifier(self.config, self.cert_manager.db_manager)
-        
+        self.ca_manager = CAManager(self.cert_manager.db_manager,
+                                    self.config.get('private_ca', {}).get('key_storage_dir'))
+
         # Setup routes
         self._setup_routes()
         
@@ -508,6 +512,176 @@ class SSLManagerAPI:
 
             except Exception as e:
                 return jsonify({'error': f'Failed to get COSE certificate info: {str(e)}'}), 500
+
+        # ── Private CA management ────────────────────────────────────────────
+
+        @self.app.route('/api/ca', methods=['GET'])
+        @self.oauth.require_auth()
+        def list_cas():
+            return jsonify({'success': True, 'cas': self.ca_manager.list_cas()}), 200
+
+        @self.app.route('/api/ca/<int:ca_id>', methods=['GET'])
+        @self.oauth.require_auth()
+        def get_ca(ca_id):
+            ca = self.ca_manager.get_ca(ca_id)
+            if ca:
+                return jsonify({'success': True, 'ca': ca}), 200
+            return jsonify({'error': 'CA not found'}), 404
+
+        @self.app.route('/api/ca/root', methods=['POST'])
+        @self.oauth.require_auth('admin')
+        def create_root_ca():
+            data = request.get_json() or {}
+            name = data.get('name')
+            if not name:
+                return jsonify({'error': 'name is required'}), 400
+            result = self.ca_manager.create_root_ca(
+                name=name,
+                common_name=data.get('common_name', name),
+                organization=data.get('organization'),
+                organizational_unit=data.get('organizational_unit'),
+                country=data.get('country', 'US'),
+                state=data.get('state'),
+                locality=data.get('locality'),
+                validity_years=data.get('validity_years', 20),
+                key_type=data.get('key_type', 'rsa'),
+                key_size_or_curve=data.get('key_size', 4096),
+                crl_distribution_points=data.get('crl_distribution_points'),
+            )
+            if result['success']:
+                return jsonify(result), 201
+            return jsonify({'error': result['error']}), 400
+
+        @self.app.route('/api/ca/intermediate', methods=['POST'])
+        @self.oauth.require_auth('admin')
+        def create_intermediate_ca():
+            data = request.get_json() or {}
+            name = data.get('name')
+            parent_id = data.get('parent_id')
+            if not name or not parent_id:
+                return jsonify({'error': 'name and parent_id are required'}), 400
+            result = self.ca_manager.create_intermediate_ca(
+                name=name,
+                parent_id=int(parent_id),
+                common_name=data.get('common_name', name),
+                organization=data.get('organization'),
+                organizational_unit=data.get('organizational_unit'),
+                country=data.get('country', 'US'),
+                state=data.get('state'),
+                locality=data.get('locality'),
+                validity_years=data.get('validity_years', 10),
+                key_type=data.get('key_type', 'rsa'),
+                key_size_or_curve=data.get('key_size', 4096),
+                crl_distribution_points=data.get('crl_distribution_points'),
+                ocsp_url=data.get('ocsp_url'),
+            )
+            if result['success']:
+                return jsonify(result), 201
+            return jsonify({'error': result['error']}), 400
+
+        @self.app.route('/api/ca/issuing', methods=['POST'])
+        @self.oauth.require_auth('admin')
+        def create_issuing_ca():
+            data = request.get_json() or {}
+            name = data.get('name')
+            parent_id = data.get('parent_id')
+            if not name or not parent_id:
+                return jsonify({'error': 'name and parent_id are required'}), 400
+            result = self.ca_manager.create_issuing_ca(
+                name=name,
+                parent_id=int(parent_id),
+                common_name=data.get('common_name', name),
+                organization=data.get('organization'),
+                organizational_unit=data.get('organizational_unit'),
+                country=data.get('country', 'US'),
+                state=data.get('state'),
+                locality=data.get('locality'),
+                validity_years=data.get('validity_years', 5),
+                key_type=data.get('key_type', 'rsa'),
+                key_size_or_curve=data.get('key_size', 4096),
+                crl_distribution_points=data.get('crl_distribution_points'),
+                ocsp_url=data.get('ocsp_url'),
+            )
+            if result['success']:
+                return jsonify(result), 201
+            return jsonify({'error': result['error']}), 400
+
+        @self.app.route('/api/ca/<int:ca_id>/issue', methods=['POST'])
+        @self.oauth.require_auth()
+        def issue_certificate_from_ca(ca_id):
+            data = request.get_json() or {}
+            common_name = data.get('common_name')
+            if not common_name:
+                return jsonify({'error': 'common_name is required'}), 400
+            result = self.ca_manager.issue_certificate(
+                ca_id=ca_id,
+                common_name=common_name,
+                cert_type=data.get('cert_type', 'server'),
+                san_dns=data.get('san_dns'),
+                san_ips=data.get('san_ips'),
+                san_emails=data.get('san_emails'),
+                validity_days=data.get('validity_days', 365),
+                key_type=data.get('key_type', 'rsa'),
+                key_size_or_curve=data.get('key_size', 2048),
+                organization=data.get('organization'),
+                organizational_unit=data.get('organizational_unit'),
+                country=data.get('country'),
+                state=data.get('state'),
+                locality=data.get('locality'),
+            )
+            if result['success']:
+                return jsonify(result), 201
+            return jsonify({'error': result['error']}), 400
+
+        @self.app.route('/api/ca/<int:ca_id>/sign-csr', methods=['POST'])
+        @self.oauth.require_auth()
+        def sign_csr(ca_id):
+            data = request.get_json() or {}
+            csr_pem = data.get('csr_pem')
+            if not csr_pem:
+                return jsonify({'error': 'csr_pem is required'}), 400
+            result = self.ca_manager.sign_csr(
+                ca_id=ca_id,
+                csr_pem=csr_pem,
+                cert_type=data.get('cert_type', 'server'),
+                validity_days=data.get('validity_days', 365),
+            )
+            if result['success']:
+                return jsonify(result), 201
+            return jsonify({'error': result['error']}), 400
+
+        @self.app.route('/api/ca/<int:ca_id>/certificates', methods=['GET'])
+        @self.oauth.require_auth()
+        def list_ca_certificates(ca_id):
+            certs = self.ca_manager.list_issued_certs(ca_id)
+            return jsonify({'success': True, 'certificates': certs}), 200
+
+        @self.app.route('/api/ca/<int:ca_id>/certificates/<int:cert_id>/revoke', methods=['POST'])
+        @self.oauth.require_auth('admin')
+        def revoke_private_certificate(ca_id, cert_id):
+            data = request.get_json() or {}
+            reason = data.get('reason', 'unspecified')
+            result = self.ca_manager.revoke_certificate(ca_id, cert_id, reason)
+            if result['success']:
+                return jsonify(result), 200
+            return jsonify({'error': result['error']}), 400
+
+        @self.app.route('/api/ca/<int:ca_id>/crl', methods=['GET'])
+        @self.oauth.require_auth()
+        def get_ca_crl(ca_id):
+            crl_pem = self.ca_manager.get_crl(ca_id)
+            if crl_pem is None:
+                return jsonify({'error': 'CA not found or no CRL generated yet'}), 404
+            return crl_pem, 200, {'Content-Type': 'application/x-pem-file',
+                                   'Content-Disposition': f'attachment; filename="ca_{ca_id}.crl.pem"'}
+
+        @self.app.route('/api/ca/<int:ca_id>/crl/regenerate', methods=['POST'])
+        @self.oauth.require_auth('admin')
+        def regenerate_ca_crl(ca_id):
+            result = self.ca_manager.regenerate_crl(ca_id)
+            if result['success']:
+                return jsonify(result), 200
+            return jsonify({'error': result['error']}), 400
 
         # Notification management
         @self.app.route('/api/notifications/test-email', methods=['POST'])

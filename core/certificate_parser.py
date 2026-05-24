@@ -895,15 +895,25 @@ class CertificateParser:
         }
 
     def _export_to_cose(self, cert_data: Dict) -> bytes:
-        """Export certificate data to COSE format."""
+        """Export certificate data as a COSE_Sign1 message (RFC 8152 §4.2).
+
+        Generates an ephemeral EC P-256 key, signs the certificate payload, and
+        returns a valid CBOR-tagged COSE_Sign1 structure.  The ephemeral public
+        key is embedded in the unprotected header (COSE key parameter 1) so that
+        verifiers can recover it.
+
+        Note: the ephemeral key is not persisted — this export format is intended
+        for transport/attestation, not long-term verification.
+        """
         if not COSE_AVAILABLE:
             raise RuntimeError("COSE export not available - pycose/cbor2 not installed")
 
         try:
-            # For now, create a simplified COSE-compatible CBOR structure
-            # This represents the certificate data in CBOR format with COSE-like structure
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.backends import default_backend
+            from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
-            # Create certificate payload
             payload_data = {
                 'common_name': cert_data.get('common_name', 'Unknown'),
                 'serial_number': cert_data.get('serial_number', 'Unknown'),
@@ -912,21 +922,36 @@ class CertificateParser:
                 'not_valid_before': cert_data.get('not_valid_before', 'Unknown'),
                 'not_valid_after': cert_data.get('not_valid_after', 'Unknown'),
                 'export_timestamp': datetime.now().isoformat(),
-                'format': 'cose'
+            }
+            payload_bytes = cbor2.dumps(payload_data)
+
+            # Generate ephemeral signing key (P-256 / ES256)
+            private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+            pub_key = private_key.public_key()
+            pub_numbers = pub_key.public_key().public_numbers() if hasattr(pub_key, 'public_key') else pub_key.public_numbers()
+
+            # Protected header: {1: -7}  (Algorithm: ES256)
+            protected = cbor2.dumps({1: -7})
+            # Unprotected header: {4: kid, -1: x, -2: y} (key ID + ephemeral public key coords)
+            unprotected = {
+                4: b'cert-manager-ephemeral',
+                -1: pub_numbers.x.to_bytes(32, 'big'),
+                -2: pub_numbers.y.to_bytes(32, 'big'),
             }
 
-            # Create a COSE-like structure (simplified)
-            # This creates a CBOR array similar to COSE_Sign1 structure: [protected, unprotected, payload, signature]
-            cose_structure = [
-                cbor2.dumps({1: -7}),  # Protected headers: algorithm ES256 (-7)
-                {4: b'cert-manager'},   # Unprotected headers: key ID
-                cbor2.dumps(payload_data),  # Payload
-                b'signature_placeholder'    # Signature placeholder
-            ]
+            # Sig_Structure (RFC 8152 §4.4): ["Signature1", protected, external_aad, payload]
+            sig_structure = cbor2.dumps(["Signature1", protected, b"", payload_bytes])
 
-            cose_bytes = cbor2.dumps(cose_structure)
+            # Sign and convert DER → fixed-length R||S (ES256 = 32+32 bytes)
+            der_sig = private_key.sign(sig_structure, ec.ECDSA(hashes.SHA256()))
+            r, s = decode_dss_signature(der_sig)
+            raw_sig = r.to_bytes(32, 'big') + s.to_bytes(32, 'big')
 
-            self.logger.info("Successfully exported certificate to COSE format")
+            # COSE_Sign1 = CBOR tag 18 wrapping [protected, unprotected, payload, signature]
+            cose_sign1 = cbor2.CBORTag(18, [protected, unprotected, payload_bytes, raw_sig])
+            cose_bytes = cbor2.dumps(cose_sign1)
+
+            self.logger.info("Successfully exported certificate to COSE_Sign1 format")
             return cose_bytes
 
         except Exception as e:
@@ -934,35 +959,59 @@ class CertificateParser:
             raise RuntimeError(f"COSE export failed: {e}")
 
     def _export_to_cwt(self, cert_data: Dict) -> bytes:
-        """Export certificate data to CWT (CBOR Web Token) format."""
+        """Export certificate data as a signed CWT (CBOR Web Token, RFC 8392).
+
+        CWT claims are encoded as a CBOR map and then wrapped in a COSE_Sign1
+        envelope (RFC 8152 §4.2) with an ephemeral ES256 key, producing a
+        fully-signed CWT as required by RFC 8392 §3.
+        """
         if not COSE_AVAILABLE:
             raise RuntimeError("CWT export not available - pycose/cbor2 not installed")
 
         try:
-            # Create CWT claims based on certificate data
-            current_time = int(datetime.now().timestamp())
-            exp_time = current_time + (365 * 24 * 60 * 60)  # 1 year from now
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.backends import default_backend
+            from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
+            current_time = int(datetime.now().timestamp())
+
+            # CWT claims map (RFC 8392 §4)
             cwt_claims = {
                 1: cert_data.get('issuer', {}).get('common_name', 'SSL Certificate Manager'),  # iss
-                2: cert_data.get('subject', {}).get('common_name', 'Unknown Subject'),  # sub
+                2: cert_data.get('subject', {}).get('common_name', cert_data.get('common_name', '')),  # sub
                 3: 'certificate-system',  # aud
-                4: exp_time,  # exp
-                5: current_time,  # nbf (not before)
-                6: current_time,  # iat (issued at)
-                7: cert_data.get('serial_number', f'cert-{current_time}'),  # cti (CWT ID)
+                4: current_time + 365 * 24 * 3600,  # exp
+                5: current_time,  # nbf
+                6: current_time,  # iat
+                7: cert_data.get('serial_number', f'cert-{current_time}').encode(),  # cti (bytes)
+                # Private claims (values 256+ are unregistered)
+                256: cert_data.get('common_name', ''),
+                257: cert_data.get('signature_algorithm', ''),
+                258: cert_data.get('days_until_expiry', -1),
+            }
+            payload_bytes = cbor2.dumps(cwt_claims)
 
-                # Custom claims for certificate data
-                100: cert_data.get('common_name', 'Unknown'),
-                101: cert_data.get('signature_algorithm', 'Unknown'),
-                102: cert_data.get('format', 'unknown'),
-                103: cert_data.get('days_until_expiry', -1)
+            # Sign as COSE_Sign1 (same construction as _export_to_cose)
+            private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+            pub_numbers = private_key.public_key().public_numbers()
+
+            protected = cbor2.dumps({1: -7})  # ES256
+            unprotected = {
+                4: b'cwt-manager-ephemeral',
+                -1: pub_numbers.x.to_bytes(32, 'big'),
+                -2: pub_numbers.y.to_bytes(32, 'big'),
             }
 
-            # Encode as CBOR
-            cwt_bytes = cbor2.dumps(cwt_claims)
+            sig_structure = cbor2.dumps(["Signature1", protected, b"", payload_bytes])
+            der_sig = private_key.sign(sig_structure, ec.ECDSA(hashes.SHA256()))
+            r, s = decode_dss_signature(der_sig)
+            raw_sig = r.to_bytes(32, 'big') + s.to_bytes(32, 'big')
 
-            self.logger.info("Successfully exported certificate to CWT format")
+            cose_sign1 = cbor2.CBORTag(18, [protected, unprotected, payload_bytes, raw_sig])
+            cwt_bytes = cbor2.dumps(cose_sign1)
+
+            self.logger.info("Successfully exported certificate to signed CWT format")
             return cwt_bytes
 
         except Exception as e:
