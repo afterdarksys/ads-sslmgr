@@ -42,6 +42,7 @@ venv/
 env/
 ENV/
 .venv/
+.worktrees/
 
 # PHP
 vendor/
