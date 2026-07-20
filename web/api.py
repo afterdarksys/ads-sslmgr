@@ -22,6 +22,10 @@ from notifications.email_notifier import EmailNotifier
 from notifications.snmp_notifier import SNMPNotifier
 from ca.ca_manager import CAManager
 from database.models import DatabaseManager, get_database_url
+from pki.enrollment import EnrollmentService
+from providers.config import ProviderConfig
+from providers.dns import BunnyDNSProvider, CloudflareDNSProvider
+from providers.registry import ProviderRegistry
 
 
 class SSLManagerAPI:
@@ -44,6 +48,26 @@ class SSLManagerAPI:
         self.snmp_notifier = SNMPNotifier(self.config, self.cert_manager.db_manager)
         self.ca_manager = CAManager(self.cert_manager.db_manager,
                                     self.config.get('private_ca', {}).get('key_storage_dir'))
+        self.enrollment_service = EnrollmentService(
+            self.cert_manager.db_manager, self.ca_manager,
+            self.config.get('private_ca', {}).get('renewal_threshold_days', 30),
+        )
+        self.provider_registry = ProviderRegistry()
+        self.provider_registry.register_ca(
+            'letsencrypt', self.renewal_router.integrations['letsencrypt'])
+        self.provider_registry.register_ca(
+            'digicert', self.renewal_router.integrations['digicert'])
+        self.provider_registry.register_ca(
+            'sectigo', self.renewal_router.integrations['sectigo'], aliases=('comodo',))
+        provider_config = ProviderConfig(self.config)
+        for name, provider_type in (
+            ('cloudflare', CloudflareDNSProvider), ('bunny', BunnyDNSProvider)):
+            keys = ('enabled', 'api_token', 'api_key', 'zone_id', 'zone_name', 'ttl', 'timeout', 'base_url')
+            values = {key: provider_config.dns(name, key) for key in keys
+                      if provider_config.dns(name, key) is not None}
+            self.provider_registry.register_dns(name, provider_type(values))
+        self.plugin_failures = self.provider_registry.discover(
+            self.config, self.cert_manager.db_manager)
 
         # Setup routes
         self._setup_routes()
@@ -514,6 +538,106 @@ class SSLManagerAPI:
                 return jsonify({'error': f'Failed to get COSE certificate info: {str(e)}'}), 500
 
         # ── Private CA management ────────────────────────────────────────────
+
+        @self.app.route('/api/providers', methods=['GET'])
+        @self.oauth.require_auth()
+        def list_providers():
+            return jsonify({
+                'success': True,
+                'certificate_authorities': self.provider_registry.list_ca(),
+                'dns_providers': self.provider_registry.list_dns(),
+                'plugin_failures': self.plugin_failures,
+            }), 200
+
+        @self.app.route('/api/providers/<kind>/<name>/health', methods=['POST'])
+        @self.oauth.require_auth('admin')
+        def provider_health(kind, name):
+            try:
+                provider = (self.provider_registry.get_ca(name) if kind == 'ca'
+                            else self.provider_registry.get_dns(name))
+            except KeyError as exc:
+                return jsonify({'success': False, 'error': str(exc)}), 404
+            check = getattr(provider, 'health', None) or getattr(provider, 'test_configuration', None)
+            if not check:
+                return jsonify({'success': False, 'error': 'Provider has no health check'}), 501
+            return jsonify({'success': True, 'provider': name, 'health': check()}), 200
+
+        @self.app.route('/api/pki/hierarchies', methods=['POST'])
+        @self.oauth.require_auth('admin')
+        def bootstrap_pki_hierarchy():
+            data = request.get_json() or {}
+            if not data.get('name_prefix'):
+                return jsonify({'success': False, 'error': 'name_prefix is required'}), 400
+            result = self.ca_manager.bootstrap_hierarchy(
+                name_prefix=data['name_prefix'],
+                common_name_prefix=data.get('common_name_prefix'),
+                organization=data.get('organization'), country=data.get('country', 'US'),
+                root_validity_years=data.get('root_validity_years', 20),
+                intermediate_validity_years=data.get('intermediate_validity_years', 10),
+                issuing_validity_years=data.get('issuing_validity_years', 5),
+                key_type=data.get('key_type', 'rsa'),
+                key_size_or_curve=data.get('key_size', 4096),
+            )
+            return jsonify(result), 201 if result.get('success') else 400
+
+        @self.app.route('/api/pki/enrollment-tokens', methods=['POST'])
+        @self.oauth.require_auth('admin')
+        def create_enrollment_token():
+            data = request.get_json() or {}
+            if not data.get('ca_id') or not data.get('name'):
+                return jsonify({'success': False, 'error': 'ca_id and name are required'}), 400
+            result = self.enrollment_service.create_token(
+                int(data['ca_id']), data['name'], data.get('cert_type', 'server'),
+                data.get('ttl_hours', 1), data.get('max_uses', 1),
+                data.get('pkinit_principal'),
+            )
+            return jsonify(result), 201 if result.get('success') else 400
+
+        @self.app.route('/api/pki/enroll', methods=['POST'])
+        def enroll_agent():
+            data = request.get_json() or {}
+            if not data.get('token') or not data.get('csr_pem'):
+                return jsonify({'success': False, 'error': 'token and csr_pem are required'}), 400
+            result = self.enrollment_service.enroll(
+                data['token'], data['csr_pem'], data.get('validity_days', 90))
+            status = 201 if result.get('success') else (401 if result.get('error_kind') == 'authentication' else 400)
+            return jsonify(result), status
+
+        @self.app.route('/api/pki/agents/<agent_id>/renew', methods=['POST'])
+        def renew_agent(agent_id):
+            data = request.get_json() or {}
+            # These WSGI environment values must be set by the TLS terminator
+            # after successful client-certificate verification. HTTP headers
+            # supplied by the caller are deliberately ignored.
+            if request.environ.get('SSL_CLIENT_VERIFY') != 'SUCCESS':
+                return jsonify({
+                    'success': False, 'error': 'Verified client certificate is required',
+                    'error_kind': 'authentication', 'retryable': False,
+                }), 401
+            fingerprint = request.environ.get('SSL_CLIENT_FINGERPRINT', '')
+            if not data.get('csr_pem'):
+                return jsonify({'success': False, 'error': 'csr_pem is required'}), 400
+            result = self.enrollment_service.renew(
+                agent_id, fingerprint, data['csr_pem'], data.get('validity_days', 90),
+                data.get('force', False))
+            status = 200 if result.get('success') else (401 if result.get('error_kind') == 'authentication' else 403)
+            return jsonify(result), status
+
+        @self.app.route('/api/pki/agents/<agent_id>/revoke', methods=['POST'])
+        @self.oauth.require_auth('admin')
+        def revoke_agent(agent_id):
+            data = request.get_json() or {}
+            # Administrative revocation authenticates through JWT; load the current
+            # agent fingerprint rather than accepting it from an untrusted body.
+            from database.models import ManagedAgent
+            session = self.cert_manager.db_manager.get_session()
+            try:
+                agent = session.query(ManagedAgent).filter_by(uuid=agent_id).first()
+                fingerprint = agent.certificate_fingerprint if agent else ''
+            finally:
+                session.close()
+            result = self.enrollment_service.revoke(agent_id, data.get('reason', 'unspecified'), fingerprint)
+            return jsonify(result), 200 if result.get('success') else 400
 
         @self.app.route('/api/ca', methods=['GET'])
         @self.oauth.require_auth()
