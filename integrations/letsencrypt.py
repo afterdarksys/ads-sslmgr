@@ -3,13 +3,18 @@ Let's Encrypt integration for automatic certificate renewal
 """
 
 import os
+import json
+import shlex
+import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from database.models import Certificate, RenewalAttempt, DatabaseManager
+from providers.config import ProviderConfig
 
 
 class LetsEncryptIntegration:
@@ -25,10 +30,13 @@ class LetsEncryptIntegration:
         self.email = self.le_config.get('email', '')
         
         # Certbot configuration
-        self.certbot_cmd = 'certbot'
-        self.config_dir = Path.home() / '.config' / 'letsencrypt'
-        self.work_dir = Path.home() / '.local' / 'share' / 'letsencrypt'
-        self.logs_dir = Path.home() / '.local' / 'share' / 'letsencrypt' / 'logs'
+        self.certbot_cmd = self.le_config.get('certbot_cmd', 'certbot')
+        self.config_dir = Path(self.le_config.get('config_dir', Path.home() / '.config' / 'letsencrypt'))
+        self.work_dir = Path(self.le_config.get('work_dir', Path.home() / '.local' / 'share' / 'letsencrypt'))
+        self.logs_dir = Path(self.le_config.get('logs_dir', Path.home() / '.local' / 'share' / 'letsencrypt' / 'logs'))
+        self.dns_provider = self.le_config.get('dns_provider', '')
+        self.certbot_plugin = self.le_config.get('certbot_plugin', '')
+        self.certbot_plugin_options = self.le_config.get('certbot_plugin_options', {})
         
         # Create directories
         self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -112,24 +120,7 @@ class LetsEncryptIntegration:
     def _renew_http_challenge(self, domains: List[str]) -> Dict:
         """Renew certificate using HTTP-01 challenge."""
         try:
-            cmd = [
-                self.certbot_cmd, 'certonly',
-                '--standalone',
-                '--non-interactive',
-                '--agree-tos',
-                '--email', self.email,
-                '--config-dir', str(self.config_dir),
-                '--work-dir', str(self.work_dir),
-                '--logs-dir', str(self.logs_dir)
-            ]
-            
-            # Add staging flag if configured
-            if self.staging:
-                cmd.append('--staging')
-            
-            # Add domains
-            for domain in domains:
-                cmd.extend(['-d', domain])
+            cmd = self._build_certbot_command(domains, 'http')
             
             # Execute certbot
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -166,25 +157,7 @@ class LetsEncryptIntegration:
     def _renew_dns_challenge(self, domains: List[str]) -> Dict:
         """Renew certificate using DNS-01 challenge."""
         try:
-            cmd = [
-                self.certbot_cmd, 'certonly',
-                '--manual',
-                '--preferred-challenges', 'dns',
-                '--non-interactive',
-                '--agree-tos',
-                '--email', self.email,
-                '--config-dir', str(self.config_dir),
-                '--work-dir', str(self.work_dir),
-                '--logs-dir', str(self.logs_dir),
-                '--manual-auth-hook', self._get_dns_auth_hook(),
-                '--manual-cleanup-hook', self._get_dns_cleanup_hook()
-            ]
-            
-            if self.staging:
-                cmd.append('--staging')
-            
-            for domain in domains:
-                cmd.extend(['-d', domain])
+            cmd = self._build_certbot_command(domains, 'dns')
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             
@@ -229,10 +202,9 @@ class LetsEncryptIntegration:
         # Add subject alternative names
         if cert.subject_alt_names:
             for san in cert.subject_alt_names:
-                if san.startswith('DNS:'):
-                    domain = san[4:]  # Remove 'DNS:' prefix
-                    if domain not in domains:
-                        domains.append(domain)
+                domain = san[4:] if san.startswith('DNS:') else san
+                if domain and domain not in domains:
+                    domains.append(domain)
         
         return domains
     
@@ -262,55 +234,55 @@ class LetsEncryptIntegration:
         except Exception:
             return None
     
-    def _get_dns_auth_hook(self) -> str:
-        """Get path to DNS authentication hook script."""
-        hook_path = self.config_dir / 'dns_auth_hook.sh'
-        
-        # Create a basic DNS auth hook if it doesn't exist
-        if not hook_path.exists():
-            hook_script = '''#!/bin/bash
-# DNS authentication hook for Let's Encrypt
-# This is a placeholder - implement your DNS provider's API calls here
-
-echo "DNS Challenge for domain: $CERTBOT_DOMAIN"
-echo "Validation: $CERTBOT_VALIDATION"
-echo "Token: $CERTBOT_TOKEN"
-
-# Example: Add TXT record _acme-challenge.$CERTBOT_DOMAIN with value $CERTBOT_VALIDATION
-# You need to implement this based on your DNS provider's API
-
-# Wait for DNS propagation
-sleep 30
-'''
-            
-            with open(hook_path, 'w') as f:
-                f.write(hook_script)
-            
-            hook_path.chmod(0o755)
-        
-        return str(hook_path)
-    
-    def _get_dns_cleanup_hook(self) -> str:
-        """Get path to DNS cleanup hook script."""
-        hook_path = self.config_dir / 'dns_cleanup_hook.sh'
-        
-        if not hook_path.exists():
-            hook_script = '''#!/bin/bash
-# DNS cleanup hook for Let's Encrypt
-# This is a placeholder - implement your DNS provider's API calls here
-
-echo "Cleaning up DNS challenge for domain: $CERTBOT_DOMAIN"
-
-# Example: Remove TXT record _acme-challenge.$CERTBOT_DOMAIN
-# You need to implement this based on your DNS provider's API
-'''
-            
-            with open(hook_path, 'w') as f:
-                f.write(hook_script)
-            
-            hook_path.chmod(0o755)
-        
-        return str(hook_path)
+    def _build_certbot_command(self, domains: List[str], challenge_type: str) -> List[str]:
+        if not self.email:
+            raise ValueError("Let's Encrypt email is required")
+        command = [self.certbot_cmd, 'certonly']
+        if challenge_type == 'http':
+            command.append('--standalone')
+        elif challenge_type == 'dns' and self.certbot_plugin:
+            command.extend(['--authenticator', self.certbot_plugin])
+            for name, value in sorted(self.certbot_plugin_options.items()):
+                command.extend(['--' + name.replace('_', '-'), str(value)])
+        elif challenge_type == 'dns':
+            if self.dns_provider not in ('cloudflare', 'bunny'):
+                raise ValueError("dns_provider must be cloudflare, bunny, or a certbot_plugin")
+            provider_config = self.config_dir / 'dns_provider.json'
+            resolver = ProviderConfig(self.config)
+            keys = ('enabled', 'api_token', 'api_key', 'zone_id', 'zone_name', 'ttl', 'timeout', 'base_url')
+            dns_config = {
+                key: resolver.dns(self.dns_provider, key)
+                for key in keys if resolver.dns(self.dns_provider, key) is not None
+            }
+            provider_config.write_text(json.dumps({'dns_providers': {self.dns_provider: dns_config}}))
+            provider_config.chmod(0o600)
+            state_dir = self.config_dir / 'dns-hook-state'
+            state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            base = [
+                sys.executable, '-m', 'providers.dns.hook',
+                '--provider', self.dns_provider,
+                '--config', str(provider_config),
+                '--state-dir', str(state_dir),
+            ]
+            auth = base[:3] + ['present'] + base[3:]
+            cleanup = base[:3] + ['cleanup'] + base[3:]
+            command.extend([
+                '--manual', '--preferred-challenges', 'dns',
+                '--manual-auth-hook', ' '.join(shlex.quote(part) for part in auth),
+                '--manual-cleanup-hook', ' '.join(shlex.quote(part) for part in cleanup),
+            ])
+        else:
+            raise ValueError("Unsupported challenge type: {}".format(challenge_type))
+        command.extend([
+            '--non-interactive', '--agree-tos', '--email', self.email,
+            '--config-dir', str(self.config_dir), '--work-dir', str(self.work_dir),
+            '--logs-dir', str(self.logs_dir),
+        ])
+        if self.staging:
+            command.append('--staging')
+        for domain in domains:
+            command.extend(['-d', domain])
+        return command
     
     def check_renewal_eligibility(self, cert: Certificate) -> Dict:
         """Check if a certificate is eligible for Let's Encrypt renewal."""
@@ -409,22 +381,17 @@ echo "Cleaning up DNS challenge for domain: $CERTBOT_DOMAIN"
         
         errors = []
         
-        # Test certbot availability
-        try:
-            result = subprocess.run([self.certbot_cmd, '--version'], 
-                                  capture_output=True, text=True)
-            if result.returncode == 0:
-                tests['certbot_available'] = True
-            else:
-                errors.append("Certbot not available or not working")
-        except Exception as e:
-            errors.append(f"Certbot test failed: {e}")
+        executable = self.certbot_cmd if os.path.isabs(self.certbot_cmd) else shutil.which(self.certbot_cmd)
+        if executable and (not os.path.isabs(executable) or Path(executable).exists()):
+            tests['certbot_available'] = True
+        else:
+            errors.append("certbot executable not found")
         
         # Test email configuration
         if self.email:
             tests['email_configured'] = True
         else:
-            errors.append("Email not configured for Let's Encrypt")
+            errors.append("email not configured")
         
         # Test directory permissions
         try:
