@@ -9,6 +9,10 @@ import os
 import sys
 from pathlib import Path
 
+# Plugin packages can register factories in the ``sslmgr.ca_providers`` and
+# ``sslmgr.dns_providers`` entry-point groups.  The application discovers them
+# through ``providers.registry.ProviderRegistry``.
+
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
