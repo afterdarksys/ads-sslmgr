@@ -1,0 +1,21 @@
+[Unit]
+Description=SSL Manager PKI API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=sslmgr
+Group=sslmgr
+WorkingDirectory=/opt/sslmgr
+Environment=SSLMGR_CONFIG=/etc/sslmgr/config.json
+EnvironmentFile=-/etc/sslmgr/sslmgr.env
+ExecStart=/opt/sslmgr/venv/bin/gunicorn --workers 4 --bind 127.0.0.1:5000 --access-logfile - wsgi:application
+Restart=on-failure
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/sslmgr /var/log/sslmgr
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -454,6 +454,43 @@ class PrivatelyIssuedCertificate(Base):
     ca = relationship('PrivateCA', back_populates='issued_certs')
 
 
+class EnrollmentToken(Base):
+    """Short-lived, hashed bootstrap credential for first agent enrollment."""
+
+    __tablename__ = 'enrollment_tokens'
+
+    id = Column(Integer, primary_key=True)
+    token_hash = Column(String(64), unique=True, nullable=False)
+    name = Column(String(255), nullable=False)
+    ca_id = Column(Integer, ForeignKey('private_cas.id'), nullable=False)
+    cert_type = Column(String(50), default='server', nullable=False)
+    pkinit_principal = Column(String(500))
+    expires_at = Column(DateTime, nullable=False)
+    max_uses = Column(Integer, default=1, nullable=False)
+    uses = Column(Integer, default=0, nullable=False)
+    is_revoked = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ManagedAgent(Base):
+    """A host identity managed by the enrollment service."""
+
+    __tablename__ = 'managed_agents'
+
+    id = Column(Integer, primary_key=True)
+    uuid = Column(String(36), unique=True, default=lambda: str(uuid.uuid4()), nullable=False)
+    name = Column(String(255), nullable=False)
+    ca_id = Column(Integer, ForeignKey('private_cas.id'), nullable=False)
+    certificate_id = Column(Integer, ForeignKey('privately_issued_certificates.id'), nullable=False)
+    cert_type = Column(String(50), default='server', nullable=False)
+    pkinit_principal = Column(String(500))
+    certificate_fingerprint = Column(String(64), unique=True, nullable=False)
+    is_revoked = Column(Boolean, default=False, nullable=False)
+    last_seen_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class DatabaseManager:
     """Database connection and session management."""
     

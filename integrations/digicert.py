@@ -6,13 +6,15 @@ download, revoke, list orders, and configuration testing.
 
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import requests
 
 from database.models import Certificate, RenewalAttempt, DatabaseManager
+from providers.certificates import atomic_write_certificate, parse_pem_bundle
+from providers.config import ProviderConfig
 
 log = logging.getLogger(__name__)
 
@@ -41,10 +43,11 @@ class DigiCertIntegration:
         self.config      = config
         self.db_manager  = db_manager
         dc               = config.get('certificate_authorities', {}).get('digicert', {})
-        self.enabled     = dc.get('enabled', False)
-        self.api_key     = dc.get('api_key', '')
-        self.org_id      = dc.get('organization_id', '')
-        self.base_url    = dc.get('base_url', 'https://www.digicert.com/services/v2')
+        resolved         = ProviderConfig(config)
+        self.enabled     = resolved.ca('digicert', 'enabled', False)
+        self.api_key     = resolved.ca('digicert', 'api_key', '')
+        self.org_id      = resolved.ca('digicert', 'organization_id', '')
+        self.base_url    = resolved.ca('digicert', 'base_url', 'https://www.digicert.com/services/v2')
         self.cert_dir    = Path(config.get('directories', {}).get('certificates', './certificates'))
         self.cert_dir.mkdir(parents=True, exist_ok=True)
         self._headers    = {
@@ -279,26 +282,15 @@ class DigiCertIntegration:
         if isinstance(pem_data, dict):
             pem_data = pem_data.get('certificate', '')
 
-        # Split into leaf + chain
-        blocks   = pem_data.split('-----END CERTIFICATE-----')
-        cert_pem = (blocks[0] + '-----END CERTIFICATE-----\n').strip() if blocks else pem_data
-        chain_pem = ('-----END CERTIFICATE-----\n'.join(blocks[1:]) + '-----END CERTIFICATE-----\n').strip() \
-                    if len(blocks) > 1 else ''
-
-        # Save to disk
         cert_filename = self.cert_dir / f'digicert_{cert_id}.pem'
-        cert_filename.write_text(cert_pem)
-
-        # Parse expiry from the leaf
-        expiry = None
         try:
-            from cryptography import x509 as cx509
-            from datetime import timezone
-            c = cx509.load_pem_x509_certificate(cert_pem.encode())
+            cert_pem, chain_pem, c = parse_pem_bundle(pem_data)
             expiry = (c.not_valid_after_utc if hasattr(c, 'not_valid_after_utc')
                       else c.not_valid_after.replace(tzinfo=timezone.utc))
-        except Exception:
-            pass
+            atomic_write_certificate(cert_filename, cert_pem)
+        except Exception as exc:
+            return {'success': False, 'error': str(exc), 'error_kind': 'validation',
+                    'retryable': False, 'provider': 'digicert'}
 
         return {
             'success':     True,
@@ -336,9 +328,15 @@ class DigiCertIntegration:
                     time.sleep(wait)
                     continue
                 if resp.status_code >= 400:
-                    body = resp.text[:500]
+                    if resp.status_code in (401, 403):
+                        return {'success': False,
+                                'error': 'DigiCert rejected the configured API credentials',
+                                'error_kind': 'authentication', 'retryable': False,
+                                'status_code': resp.status_code}
                     return {'success': False,
-                            'error':   f'HTTP {resp.status_code}: {body}',
+                            'error':   f'DigiCert API returned HTTP {resp.status_code}',
+                            'error_kind': 'remote_service',
+                            'retryable': resp.status_code >= 500,
                             'status_code': resp.status_code}
                 try:
                     data = resp.json()

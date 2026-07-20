@@ -24,6 +24,22 @@ from notifications.email_notifier import EmailNotifier
 from notifications.snmp_notifier import SNMPNotifier
 
 
+def _make_provider_registry(config):
+    from providers.config import ProviderConfig
+    from providers.dns import BunnyDNSProvider, CloudflareDNSProvider
+    from providers.registry import ProviderRegistry
+
+    db = DatabaseManager(get_database_url(config))
+    router = RenewalRouter(config, db)
+    registry = router.provider_registry
+    resolved = ProviderConfig(config)
+    for name, provider_type in (('cloudflare', CloudflareDNSProvider), ('bunny', BunnyDNSProvider)):
+        keys = ('enabled', 'api_token', 'api_key', 'zone_id', 'zone_name', 'ttl', 'timeout', 'base_url')
+        values = {key: resolved.dns(name, key) for key in keys if resolved.dns(name, key) is not None}
+        registry.register_dns(name, provider_type(values))
+    return registry, router.plugin_failures
+
+
 def load_config(config_path: str = None) -> dict:
     """Load configuration from file."""
     if not config_path:
@@ -496,6 +512,50 @@ def export(ctx, output_format, output, issuer, expiring):
 
 
 @cli.group()
+def providers():
+    """Certificate authority and DNS provider plugins."""
+    pass
+
+
+@providers.command('list')
+@click.option('--format', 'output_format', default='table',
+              type=click.Choice(['table', 'json']))
+@click.pass_context
+def providers_list(ctx, output_format):
+    """List built-in and installed provider plugins."""
+    registry, failures = _make_provider_registry(ctx.obj['config'])
+    result = {
+        'certificate_authorities': registry.list_ca(),
+        'dns_providers': registry.list_dns(),
+        'plugin_failures': failures,
+    }
+    if output_format == 'json':
+        click.echo(json.dumps(result, indent=2))
+        return
+    click.echo('Certificate authorities: ' + ', '.join(result['certificate_authorities']))
+    click.echo('DNS providers: ' + ', '.join(result['dns_providers']))
+    for failure in failures:
+        click.echo('Plugin failed: {provider}: {error}'.format(**failure), err=True)
+
+
+@providers.command('health')
+@click.argument('name')
+@click.option('--kind', type=click.Choice(['ca', 'dns']), default='ca')
+@click.pass_context
+def providers_health(ctx, name, kind):
+    """Run an explicit provider configuration/reachability check."""
+    registry, _ = _make_provider_registry(ctx.obj['config'])
+    try:
+        provider = registry.get_ca(name) if kind == 'ca' else registry.get_dns(name)
+    except KeyError as exc:
+        raise click.ClickException(str(exc))
+    check = getattr(provider, 'health', None) or getattr(provider, 'test_configuration', None)
+    if not check:
+        raise click.ClickException('Provider has no health check')
+    click.echo(json.dumps(check(), indent=2, default=str))
+
+
+@cli.group()
 @click.pass_context
 def ca(ctx):
     """Private Certificate Authority management."""
@@ -507,8 +567,63 @@ def _make_ca_manager(ctx) -> 'CAManager':
     from ca.ca_manager import CAManager
     config = ctx.obj['config']
     db_manager = DatabaseManager(get_database_url(config))
+    db_manager.create_tables()
     key_dir = config.get('private_ca', {}).get('key_storage_dir')
     return CAManager(db_manager, key_dir)
+
+
+@ca.command('bootstrap')
+@click.argument('name_prefix')
+@click.option('--common-name-prefix')
+@click.option('--org')
+@click.option('--country', default='US')
+@click.option('--key-type', default='rsa', type=click.Choice(['rsa', 'ec']))
+@click.option('--key-size', default=4096, type=int)
+@click.option('--format', 'output_format', default='table', type=click.Choice(['table', 'json']))
+@click.pass_context
+def ca_bootstrap(ctx, name_prefix, common_name_prefix, org, country,
+                 key_type, key_size, output_format):
+    """Create Root → Intermediate 1 → Intermediate 2 → Issuing CA."""
+    result = _make_ca_manager(ctx).bootstrap_hierarchy(
+        name_prefix, common_name_prefix, organization=org, country=country,
+        key_type=key_type, key_size_or_curve=key_size,
+    )
+    if not result.get('success'):
+        raise click.ClickException(result.get('error', 'Hierarchy bootstrap failed'))
+    if output_format == 'json':
+        click.echo(json.dumps(result, indent=2))
+    else:
+        for item in result['hierarchy']:
+            click.echo('{ca_type}: ID={id} path_length={path_length}'.format(**item))
+        click.echo('Issuing CA ID: {}'.format(result['issuing_ca_id']))
+
+
+@ca.command('create-token')
+@click.argument('ca_id', type=int)
+@click.argument('name')
+@click.option('--type', 'cert_type', default='server',
+              type=click.Choice(['server', 'client', 'pkinit_client', 'pkinit_kdc']))
+@click.option('--pkinit-principal')
+@click.option('--ttl-hours', default=1, type=int)
+@click.option('--format', 'output_format', default='table', type=click.Choice(['table', 'json']))
+@click.pass_context
+def ca_create_token(ctx, ca_id, name, cert_type, pkinit_principal,
+                    ttl_hours, output_format):
+    """Create a short-lived one-time host enrollment token."""
+    from pki.enrollment import EnrollmentService
+    manager = _make_ca_manager(ctx)
+    service = EnrollmentService(manager.db, manager)
+    result = service.create_token(
+        ca_id, name, cert_type=cert_type, ttl_hours=ttl_hours,
+        pkinit_principal=pkinit_principal,
+    )
+    if not result.get('success'):
+        raise click.ClickException(result.get('error', 'Token creation failed'))
+    if output_format == 'json':
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo('Enrollment token (shown once): {}'.format(result['token']))
+        click.echo('Expires: {}'.format(result['expires_at']))
 
 
 @ca.command('list')
@@ -658,8 +773,10 @@ def ca_create_issuing(ctx, name, parent_id, common_name, org, country,
 @click.argument('ca_id', type=int)
 @click.argument('common_name')
 @click.option('--type', 'cert_type', default='server',
-              type=click.Choice(['server', 'client', 'code_signing', 'email', 'ocsp', 'timestamping']),
+              type=click.Choice(['server', 'client', 'code_signing', 'email', 'ocsp', 'timestamping',
+                                 'pkinit_client', 'pkinit_kdc']),
               help='Certificate type')
+@click.option('--pkinit-principal', help='Kerberos principal, including @REALM')
 @click.option('--san', 'san_dns', multiple=True, help='DNS SAN entries (repeatable)')
 @click.option('--ip', 'san_ips', multiple=True, help='IP SAN entries (repeatable)')
 @click.option('--days', default=365, type=int, help='Validity in days')
@@ -668,7 +785,7 @@ def ca_create_issuing(ctx, name, parent_id, common_name, org, country,
 @click.option('--out-cert', '-o', help='Write cert PEM to this file')
 @click.option('--out-key', '-k', help='Write key PEM to this file')
 @click.pass_context
-def ca_issue(ctx, ca_id, common_name, cert_type, san_dns, san_ips, days,
+def ca_issue(ctx, ca_id, common_name, cert_type, pkinit_principal, san_dns, san_ips, days,
              key_type, key_size, out_cert, out_key):
     """Issue a certificate from CA_ID for COMMON_NAME."""
     try:
@@ -683,6 +800,7 @@ def ca_issue(ctx, ca_id, common_name, cert_type, san_dns, san_ips, days,
             validity_days=days,
             key_type=key_type,
             key_size_or_curve=key_size,
+            pkinit_principal=pkinit_principal,
         )
         if result['success']:
             click.echo(f"Certificate issued: ID={result['cert_id']}  "

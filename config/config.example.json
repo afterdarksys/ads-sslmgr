@@ -36,7 +36,9 @@
         "letsencrypt": {
             "enabled": true,
             "staging": false,
-            "email": "admin@yourcompany.com"
+            "email": "admin@yourcompany.com",
+            "dns_provider": "cloudflare",
+            "certbot_cmd": "certbot"
         },
         "digicert": {
             "enabled": false,
@@ -45,8 +47,25 @@
         },
         "sectigo": {
             "enabled": false,
-            "api_key": "your-sectigo-api-key",
-            "customer_uri": "your-customer-uri"
+            "login": "your-scm-login",
+            "password": "your-scm-api-password",
+            "customer_uri": "your-customer-uri",
+            "org_id": "your-org-id"
+        }
+    },
+    "dns_providers": {
+        "cloudflare": {
+            "enabled": false,
+            "api_token": "",
+            "zone_id": "",
+            "ttl": 60
+        },
+        "bunny": {
+            "enabled": false,
+            "api_key": "",
+            "zone_id": "",
+            "zone_name": "example.com",
+            "ttl": 60
         }
     },
     "cloud_providers": {
@@ -73,7 +92,9 @@
         "host": "0.0.0.0",
         "port": 5000,
         "debug": false,
-        "secret_key": "your-secret-key-change-this"
+        "secret_key": "your-secret-key-change-this",
+        "cors_origins": [],
+        "max_request_bytes": 2097152
     },
     "directories": {
         "certificates": "/path/to/certificates",

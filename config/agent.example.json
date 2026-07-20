@@ -1,0 +1,11 @@
+{
+    "server_url": "https://pki.example.com",
+    "state_dir": "/var/lib/sslmgr-agent",
+    "common_name": "host.example.com",
+    "san_dns": ["host.example.com"],
+    "renewal_days": 30,
+    "key_type": "rsa",
+    "key_size": 2048,
+    "verify_tls": "/etc/sslmgr-agent/bootstrap-ca.crt",
+    "post_install_hook": ["systemctl", "reload", "nginx"]
+}

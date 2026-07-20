@@ -13,6 +13,7 @@ from integrations.comodo import ComodoIntegration
 from integrations.aws_certificates import AWSCertificateIntegration
 from integrations.cloudflare_certificates import CloudflareIntegration
 from integrations.private_ca_integration import PrivateCAIntegration
+from providers.registry import ProviderRegistry
 
 
 class RenewalRouter:
@@ -34,6 +35,13 @@ class RenewalRouter:
             'cloudflare': CloudflareIntegration(config, db_manager),
             'private': PrivateCAIntegration(config, db_manager),
         }
+        self.provider_registry = ProviderRegistry()
+        for name in ('letsencrypt', 'digicert', 'aws', 'cloudflare', 'private'):
+            self.provider_registry.register_ca(name, self.integrations[name])
+        self.provider_registry.register_ca('sectigo', _sectigo, aliases=('comodo',))
+        self.plugin_failures = self.provider_registry.discover(config, db_manager)
+        for name in self.provider_registry.list_ca():
+            self.integrations[name] = self.provider_registry.get_ca(name)
 
         # Issuer mapping patterns
         self.issuer_patterns = {
@@ -102,14 +110,16 @@ class RenewalRouter:
             
             # Check if CA integration is enabled
             integration = self.integrations[target_ca]
-            if not integration.enabled:
+            if not getattr(integration, 'enabled', True):
                 return {
                     'success': False,
                     'error': f'{target_ca.title()} integration is disabled'
                 }
             
             # Check renewal eligibility
-            eligibility = integration.check_renewal_eligibility(cert)
+            eligibility_check = getattr(integration, 'check_renewal_eligibility', None)
+            eligibility = (eligibility_check(cert) if eligibility_check
+                           else {'eligible': True})
             if not eligibility['eligible']:
                 return {
                     'success': False,
@@ -119,7 +129,15 @@ class RenewalRouter:
             # Perform renewal
             print(f"Routing renewal to {target_ca.title()} for certificate: {cert.common_name}")
             
-            renewal_result = integration.renew_certificate(cert, **renewal_options)
+            if hasattr(integration, 'renew_certificate'):
+                renewal_result = integration.renew_certificate(cert, **renewal_options)
+            elif hasattr(integration, 'renew'):
+                renewal_result = integration.renew({
+                    'certificate': cert, 'options': renewal_options,
+                })
+            else:
+                return {'success': False,
+                        'error': '{} provider does not support renewal'.format(target_ca)}
             
             # Add routing information to result
             renewal_result['routed_to'] = target_ca

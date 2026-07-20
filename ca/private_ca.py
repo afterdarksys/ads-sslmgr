@@ -29,6 +29,12 @@ from cryptography.x509 import (
     RevokedCertificateBuilder,
 )
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from cryptography.x509.oid import ObjectIdentifier
+
+
+PKINIT_SAN_OID = ObjectIdentifier('1.3.6.1.5.2.2')
+PKINIT_CLIENT_EKU_OID = ObjectIdentifier('1.3.6.1.5.2.3.4')
+PKINIT_KDC_EKU_OID = ObjectIdentifier('1.3.6.1.5.2.3.5')
 
 
 class CertificateType:
@@ -38,6 +44,8 @@ class CertificateType:
     EMAIL        = 'email'
     OCSP         = 'ocsp'
     TIMESTAMPING = 'timestamping'
+    PKINIT_CLIENT = 'pkinit_client'
+    PKINIT_KDC    = 'pkinit_kdc'
     ROOT_CA      = 'root_ca'
     INTERMEDIATE_CA = 'intermediate_ca'
     ISSUING_CA   = 'issuing_ca'
@@ -302,6 +310,7 @@ class PrivateCAManager:
         crl_distribution_points: List[str] = None,
         ocsp_url: str = None,
         existing_csr_pem: Union[str, bytes] = None,
+        pkinit_principal: str = None,
     ) -> Dict:
         """
         Issue an end-entity certificate from the given CA.
@@ -350,7 +359,10 @@ class PrivateCAManager:
         if eku:
             builder = builder.add_extension(eku, critical=False)
 
-        sans = self._build_san(common_name, cert_type, san_dns, san_ips, san_emails, san_uris)
+        sans = self._build_san(
+            common_name, cert_type, san_dns, san_ips, san_emails, san_uris,
+            pkinit_principal=pkinit_principal,
+        )
         if sans:
             builder = builder.add_extension(x509.SubjectAlternativeName(sans), critical=False)
 
@@ -371,6 +383,7 @@ class PrivateCAManager:
             'san_emails': san_emails or [],
             'key_type': key_type,
             'issuing_ca_cn': self._cn(ca_cert),
+            'pkinit_principal': pkinit_principal,
         }
         if key_pem_out:
             result['key_pem'] = key_pem_out
@@ -389,6 +402,7 @@ class PrivateCAManager:
         ca_key_password: bytes = None,
         crl_distribution_points: List[str] = None,
         ocsp_url: str = None,
+        pkinit_principal: str = None,
     ) -> Dict:
         """Sign an external CSR. SANs are taken from the CSR if not overridden."""
         if isinstance(csr_pem, str):
@@ -400,9 +414,9 @@ class PrivateCAManager:
         if san_dns is None and san_ips is None and san_emails is None:
             try:
                 san_ext = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-                san_dns    = [n.value for n in san_ext.value.get_values_for_type(x509.DNSName)]
-                san_ips    = [str(n.value) for n in san_ext.value.get_values_for_type(x509.IPAddress)]
-                san_emails = [n.value for n in san_ext.value.get_values_for_type(x509.RFC822Name)]
+                san_dns    = list(san_ext.value.get_values_for_type(x509.DNSName))
+                san_ips    = [str(n) for n in san_ext.value.get_values_for_type(x509.IPAddress)]
+                san_emails = list(san_ext.value.get_values_for_type(x509.RFC822Name))
             except x509.ExtensionNotFound:
                 pass
 
@@ -419,6 +433,7 @@ class PrivateCAManager:
             crl_distribution_points=crl_distribution_points,
             ocsp_url=ocsp_url,
             existing_csr_pem=csr_pem,
+            pkinit_principal=pkinit_principal,
         )
 
     def generate_csr(
@@ -609,13 +624,23 @@ class PrivateCAManager:
         elif cert_type == CertificateType.TIMESTAMPING:
             ku_args.update(digital_signature=True, content_commitment=True)
             eku = x509.ExtendedKeyUsage([ExtendedKeyUsageOID.TIME_STAMPING])
+        elif cert_type == CertificateType.PKINIT_CLIENT:
+            ku_args.update(digital_signature=True)
+            eku = x509.ExtendedKeyUsage([PKINIT_CLIENT_EKU_OID])
+        elif cert_type == CertificateType.PKINIT_KDC:
+            ku_args.update(
+                digital_signature=True, content_commitment=True,
+                key_encipherment=True, key_agreement=True,
+            )
+            eku = x509.ExtendedKeyUsage([PKINIT_KDC_EKU_OID])
         else:
             # Default to server
             ku_args.update(digital_signature=True, key_encipherment=True)
             eku = x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH])
         return x509.KeyUsage(**ku_args), eku
 
-    def _build_san(self, cn, cert_type, san_dns, san_ips, san_emails, san_uris):
+    def _build_san(self, cn, cert_type, san_dns, san_ips, san_emails, san_uris,
+                   pkinit_principal=None):
         san = []
         # For server/client auto-include CN as DNS SAN when no explicit SANs given
         if cert_type in (CertificateType.SERVER, CertificateType.CLIENT) and san_dns is None:
@@ -631,7 +656,38 @@ class PrivateCAManager:
             san.append(x509.RFC822Name(e))
         for u in (san_uris or []):
             san.append(x509.UniformResourceIdentifier(u))
+        if cert_type in (CertificateType.PKINIT_CLIENT, CertificateType.PKINIT_KDC):
+            if not pkinit_principal:
+                raise ValueError('pkinit_principal is required for PKINIT certificate profiles')
+            san.append(x509.OtherName(PKINIT_SAN_OID, self._encode_pkinit_principal(pkinit_principal)))
         return san
+
+    @staticmethod
+    def _der_length(length):
+        if length < 128:
+            return bytes([length])
+        encoded = length.to_bytes((length.bit_length() + 7) // 8, 'big')
+        return bytes([0x80 | len(encoded)]) + encoded
+
+    @classmethod
+    def _der(cls, tag, content):
+        return bytes([tag]) + cls._der_length(len(content)) + content
+
+    @classmethod
+    def _encode_pkinit_principal(cls, principal):
+        """Encode RFC 4556 KRB5PrincipalName for an OtherName SAN."""
+        if '@' not in principal:
+            raise ValueError('PKINIT principal must include a realm (name@REALM)')
+        name, realm = principal.rsplit('@', 1)
+        components = [item for item in name.split('/') if item]
+        if not components or not realm:
+            raise ValueError('PKINIT principal is invalid')
+        name_type = 2 if len(components) > 1 else 1
+        integer = cls._der(0x02, bytes([name_type]))
+        names = b''.join(cls._der(0x1B, item.encode('utf-8')) for item in components)
+        principal_name = cls._der(0x30, cls._der(0xA0, integer) + cls._der(0xA1, cls._der(0x30, names)))
+        body = cls._der(0xA0, cls._der(0x1B, realm.encode('utf-8'))) + cls._der(0xA1, principal_name)
+        return cls._der(0x30, body)
 
     def _add_cdp(self, builder, urls):
         if not urls:
