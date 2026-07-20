@@ -24,24 +24,37 @@ class LetsEncryptIntegration:
         self.config = config
         self.db_manager = db_manager
         self.le_config = config.get('certificate_authorities', {}).get('letsencrypt', {})
-        
-        self.enabled = self.le_config.get('enabled', False)
-        self.staging = self.le_config.get('staging', False)
-        self.email = self.le_config.get('email', '')
+        resolved = ProviderConfig(config)
+
+        self.enabled = resolved.ca('letsencrypt', 'enabled', False)
+        self.staging = resolved.ca('letsencrypt', 'staging', False)
+        self.email = resolved.ca('letsencrypt', 'email', '')
         
         # Certbot configuration
-        self.certbot_cmd = self.le_config.get('certbot_cmd', 'certbot')
-        self.config_dir = Path(self.le_config.get('config_dir', Path.home() / '.config' / 'letsencrypt'))
-        self.work_dir = Path(self.le_config.get('work_dir', Path.home() / '.local' / 'share' / 'letsencrypt'))
-        self.logs_dir = Path(self.le_config.get('logs_dir', Path.home() / '.local' / 'share' / 'letsencrypt' / 'logs'))
-        self.dns_provider = self.le_config.get('dns_provider', '')
-        self.certbot_plugin = self.le_config.get('certbot_plugin', '')
-        self.certbot_plugin_options = self.le_config.get('certbot_plugin_options', {})
+        self.certbot_cmd = resolved.ca('letsencrypt', 'certbot_cmd', 'certbot')
+        self.config_dir = Path(resolved.ca('letsencrypt', 'config_dir', Path.home() / '.config' / 'letsencrypt'))
+        self.work_dir = Path(resolved.ca('letsencrypt', 'work_dir', Path.home() / '.local' / 'share' / 'letsencrypt'))
+        self.logs_dir = Path(resolved.ca('letsencrypt', 'logs_dir', Path.home() / '.local' / 'share' / 'letsencrypt' / 'logs'))
+        self.dns_provider = resolved.ca('letsencrypt', 'dns_provider', '')
+        self.certbot_plugin = resolved.ca('letsencrypt', 'certbot_plugin', '')
+        self.certbot_plugin_options = resolved.ca('letsencrypt', 'certbot_plugin_options', {})
         
         # Create directories
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+
+    def issue_certificate(self, domains: List[str], challenge_type: str = 'http') -> Dict:
+        """Issue a new certificate without requiring an inventory DB record."""
+        if not self.enabled:
+            return {'success': False, 'error': "Let's Encrypt integration is disabled"}
+        if not domains:
+            return {'success': False, 'error': 'At least one domain is required'}
+        if challenge_type == 'http':
+            return self._renew_http_challenge(domains)
+        if challenge_type == 'dns':
+            return self._renew_dns_challenge(domains)
+        return {'success': False, 'error': 'Unsupported challenge type: {}'.format(challenge_type)}
     
     def renew_certificate(self, cert: Certificate, domains: List[str] = None, 
                          challenge_type: str = 'http') -> Dict:

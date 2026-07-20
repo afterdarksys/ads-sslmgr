@@ -20,6 +20,7 @@ import requests
 
 from database.models import Certificate, RenewalAttempt, DatabaseManager
 from providers.certificates import atomic_write_certificate, parse_pem_bundle
+from providers.config import ProviderConfig
 
 log = logging.getLogger(__name__)
 
@@ -52,13 +53,17 @@ class ComodoIntegration:
         # Support both 'sectigo' and legacy 'comodo' config keys
         ca_cfg = (config.get('certificate_authorities', {}).get('sectigo')
                   or config.get('certificate_authorities', {}).get('comodo', {}))
+        resolved = ProviderConfig(config)
+        def value(key, default=''):
+            result = resolved.ca('sectigo', key, None)
+            return ca_cfg.get(key, default) if result is None else result
 
-        self.enabled      = ca_cfg.get('enabled', False)
-        self.login        = ca_cfg.get('login', '')
-        self.password     = ca_cfg.get('password', '')
-        self.customer_uri = ca_cfg.get('customer_uri', '')
-        self.org_id       = ca_cfg.get('org_id', '')
-        self.base_url     = ca_cfg.get('base_url', _BASE_URL)
+        self.enabled      = value('enabled', False)
+        self.login        = value('login')
+        self.password     = value('password')
+        self.customer_uri = value('customer_uri')
+        self.org_id       = value('org_id')
+        self.base_url     = value('base_url', _BASE_URL)
         self.cert_dir     = Path(config.get('directories', {}).get('certificates', './certificates'))
         self.cert_dir.mkdir(parents=True, exist_ok=True)
 

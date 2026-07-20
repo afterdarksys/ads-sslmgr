@@ -47,7 +47,9 @@ DEFAULT_CONFIG = {
         "letsencrypt": {
             "enabled": False,
             "staging": True,
-            "email": ""
+            "email": "",
+            "dns_provider": "cloudflare",
+            "certbot_cmd": "certbot"
         },
         "digicert": {
             "enabled": False,
@@ -61,6 +63,10 @@ DEFAULT_CONFIG = {
             "customer_uri": "",
             "org_id": ""
         }
+    },
+    "dns_providers": {
+        "cloudflare": {"enabled": False, "api_token": "", "zone_id": "", "ttl": 60},
+        "bunny": {"enabled": False, "api_key": "", "zone_id": "", "zone_name": "", "ttl": 60}
     },
     "cloud_providers": {
         "aws": {
@@ -92,7 +98,9 @@ DEFAULT_CONFIG = {
         "host": "0.0.0.0",
         "port": 5000,
         "debug": False,
-        "secret_key": os.urandom(32).hex()
+        "secret_key": os.urandom(32).hex(),
+        "cors_origins": [],
+        "max_request_bytes": 2097152
     },
     "directories": {
         "certificates": str(project_root / "certificates"),
@@ -182,7 +190,8 @@ def _importable(name: str) -> bool:
 
 
 def make_scripts_executable() -> None:
-    for rel in ('cli/ssl_manager.py', 'scripts/send_notifications.py'):
+    for rel in ('cli/ssl_manager.py', 'scripts/send_notifications.py',
+                'agents/certificate_agent.py'):
         p = project_root / rel
         if p.exists():
             p.chmod(0o755)

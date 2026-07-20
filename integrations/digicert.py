@@ -14,6 +14,7 @@ import requests
 
 from database.models import Certificate, RenewalAttempt, DatabaseManager
 from providers.certificates import atomic_write_certificate, parse_pem_bundle
+from providers.config import ProviderConfig
 
 log = logging.getLogger(__name__)
 
@@ -42,10 +43,11 @@ class DigiCertIntegration:
         self.config      = config
         self.db_manager  = db_manager
         dc               = config.get('certificate_authorities', {}).get('digicert', {})
-        self.enabled     = dc.get('enabled', False)
-        self.api_key     = dc.get('api_key', '')
-        self.org_id      = dc.get('organization_id', '')
-        self.base_url    = dc.get('base_url', 'https://www.digicert.com/services/v2')
+        resolved         = ProviderConfig(config)
+        self.enabled     = resolved.ca('digicert', 'enabled', False)
+        self.api_key     = resolved.ca('digicert', 'api_key', '')
+        self.org_id      = resolved.ca('digicert', 'organization_id', '')
+        self.base_url    = resolved.ca('digicert', 'base_url', 'https://www.digicert.com/services/v2')
         self.cert_dir    = Path(config.get('directories', {}).get('certificates', './certificates'))
         self.cert_dir.mkdir(parents=True, exist_ok=True)
         self._headers    = {

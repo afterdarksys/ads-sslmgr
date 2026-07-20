@@ -112,3 +112,21 @@ def test_digicert_retries_rate_limit_then_succeeds(tmp_path, db_manager):
         result = provider._request("GET", "/user/me")
 
     assert result == {"success": True, "data": {"id": 1}, "status_code": 200}
+
+
+def test_commercial_provider_credentials_support_environment_overrides(tmp_path, db_manager, monkeypatch):
+    from integrations.digicert import DigiCertIntegration
+    from integrations.comodo import ComodoIntegration
+
+    monkeypatch.setenv("SSLMGR_CA_DIGICERT_API_KEY", "env-digicert")
+    monkeypatch.setenv("SSLMGR_CA_SECTIGO_PASSWORD", "env-sectigo")
+    config = {
+        "directories": {"certificates": str(tmp_path)},
+        "certificate_authorities": {
+            "digicert": {"api_key": "json-key"},
+            "sectigo": {"password": "json-password"},
+        },
+    }
+
+    assert DigiCertIntegration(config, db_manager).api_key == "env-digicert"
+    assert ComodoIntegration(config, db_manager).password == "env-sectigo"

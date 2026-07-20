@@ -1,5 +1,6 @@
 import json
 from functools import wraps
+from unittest.mock import MagicMock
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -50,6 +51,12 @@ def test_api_exposes_providers_and_private_pki_enrollment(tmp_path, monkeypatch)
     client = api.app.test_client()
 
     providers = client.get("/api/providers")
+    fake_digicert = MagicMock()
+    fake_digicert.order_certificate.return_value = {"success": True, "order_id": "order-1"}
+    api.provider_registry._ca["digicert"] = fake_digicert
+    public_order = client.post("/api/providers/digicert/orders", json={
+        "common_name": "public.example.com", "san_domains": ["public.example.com"],
+    })
     hierarchy = client.post("/api/pki/hierarchies", json={
         "name_prefix": "api", "common_name_prefix": "API Test", "key_size": 2048,
     })
@@ -67,6 +74,8 @@ def test_api_exposes_providers_and_private_pki_enrollment(tmp_path, monkeypatch)
     )
 
     assert providers.status_code == 200
+    assert public_order.status_code == 202
+    assert public_order.get_json()["order_id"] == "order-1"
     assert set(providers.get_json()["certificate_authorities"]) >= {"letsencrypt", "digicert", "sectigo"}
     assert set(providers.get_json()["dns_providers"]) >= {"cloudflare", "bunny"}
     assert hierarchy.status_code == 201

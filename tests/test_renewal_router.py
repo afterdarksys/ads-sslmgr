@@ -99,6 +99,30 @@ class TestForceCA:
         assert not result.get('success')
         assert 'error' in result
 
+    def test_discovered_ca_plugin_can_handle_forced_renewal(self, test_config, db_manager, monkeypatch):
+        from providers.registry import ProviderRegistry
+        from core.renewal_router import RenewalRouter
+
+        class Plugin:
+            enabled = True
+
+            def renew(self, request):
+                return {"success": True, "plugin_request": request}
+
+        def discover(registry, config, manager):
+            registry.register_ca("custom", Plugin())
+            return []
+
+        monkeypatch.setattr(ProviderRegistry, "discover", discover)
+        router = RenewalRouter(test_config, db_manager)
+        cert = _fake_cert()
+
+        result = router.route_renewal(cert, force_ca="custom", renewal_options={"profile": "dv"})
+
+        assert result["success"] is True
+        assert result["plugin_request"]["certificate"] is cert
+        assert result["plugin_request"]["options"] == {"profile": "dv"}
+
 
 # ── integration status ────────────────────────────────────────────────────────
 

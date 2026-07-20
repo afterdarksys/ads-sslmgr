@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _integration(tmp_path, db_manager, **overrides):
@@ -86,3 +87,13 @@ def test_domain_extraction_accepts_plain_and_prefixed_sans(tmp_path, db_manager)
     assert integration._extract_domains_from_cert(Cert()) == [
         "example.com", "www.example.com", "api.example.com"
     ]
+
+
+def test_issue_certificate_runs_certbot_without_database_record(tmp_path, db_manager):
+    integration = _integration(tmp_path, db_manager)
+    completed = type("Completed", (), {"returncode": 0, "stdout": "issued", "stderr": ""})()
+    with patch("integrations.letsencrypt.subprocess.run", return_value=completed):
+        result = integration.issue_certificate(["example.com"], challenge_type="http")
+
+    assert result["success"] is True
+    assert result["output"] == "issued"
