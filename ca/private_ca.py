@@ -414,9 +414,9 @@ class PrivateCAManager:
         if san_dns is None and san_ips is None and san_emails is None:
             try:
                 san_ext = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-                san_dns    = [n.value for n in san_ext.value.get_values_for_type(x509.DNSName)]
-                san_ips    = [str(n.value) for n in san_ext.value.get_values_for_type(x509.IPAddress)]
-                san_emails = [n.value for n in san_ext.value.get_values_for_type(x509.RFC822Name)]
+                san_dns    = list(san_ext.value.get_values_for_type(x509.DNSName))
+                san_ips    = [str(n) for n in san_ext.value.get_values_for_type(x509.IPAddress)]
+                san_emails = list(san_ext.value.get_values_for_type(x509.RFC822Name))
             except x509.ExtensionNotFound:
                 pass
 
