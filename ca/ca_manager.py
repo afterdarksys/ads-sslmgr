@@ -63,6 +63,7 @@ class CAManager:
                 not_valid_after=datetime.fromisoformat(result['not_valid_after']),
                 key_type=result['key_type'],
                 validity_years=kwargs.get('validity_years', 20),
+                path_length=kwargs.get('path_length'),
                 is_active=True,
             )
             session.add(rec)
@@ -110,6 +111,7 @@ class CAManager:
                 not_valid_after=datetime.fromisoformat(result['not_valid_after']),
                 key_type=result['key_type'],
                 validity_years=kwargs.get('validity_years', 10),
+                path_length=kwargs.get('path_length', 0),
                 is_active=True,
             )
             session.add(rec)
@@ -157,6 +159,7 @@ class CAManager:
                 not_valid_after=datetime.fromisoformat(result['not_valid_after']),
                 key_type=result['key_type'],
                 validity_years=kwargs.get('validity_years', 5),
+                path_length=0,
                 is_active=True,
             )
             session.add(rec)
@@ -171,6 +174,53 @@ class CAManager:
             session.close()
 
     # ── Certificate issuance ─────────────────────────────────────────────────
+
+    def bootstrap_hierarchy(self, name_prefix: str, common_name_prefix: str = None,
+                            **kwargs) -> Dict:
+        """Create Root → Intermediate 1 → Intermediate 2 → Issuing CA."""
+        cn = common_name_prefix or name_prefix
+        root_years = kwargs.pop('root_validity_years', 20)
+        intermediate_years = kwargs.pop('intermediate_validity_years', 10)
+        issuing_years = kwargs.pop('issuing_validity_years', 5)
+        definitions = []
+
+        root = self.create_root_ca(
+            f'{name_prefix}-root', common_name=f'{cn} Root CA',
+            validity_years=root_years, path_length=3, **kwargs)
+        if not root.get('success'):
+            return root
+        definitions.append((root['ca_id'], 'root', 3, root['cert_pem']))
+
+        inter1 = self.create_intermediate_ca(
+            f'{name_prefix}-intermediate-1', root['ca_id'],
+            common_name=f'{cn} Intermediate CA 1', validity_years=intermediate_years,
+            path_length=2, **kwargs)
+        if not inter1.get('success'):
+            return inter1
+        definitions.append((inter1['ca_id'], 'intermediate', 2, inter1['cert_pem']))
+
+        inter2 = self.create_intermediate_ca(
+            f'{name_prefix}-intermediate-2', inter1['ca_id'],
+            common_name=f'{cn} Intermediate CA 2', validity_years=intermediate_years,
+            path_length=1, **kwargs)
+        if not inter2.get('success'):
+            return inter2
+        definitions.append((inter2['ca_id'], 'intermediate', 1, inter2['cert_pem']))
+
+        issuing = self.create_issuing_ca(
+            f'{name_prefix}-issuing', inter2['ca_id'],
+            common_name=f'{cn} Issuing CA', validity_years=issuing_years, **kwargs)
+        if not issuing.get('success'):
+            return issuing
+        definitions.append((issuing['ca_id'], 'issuing', 0, issuing['cert_pem']))
+
+        hierarchy = [
+            {'id': ca_id, 'ca_type': ca_type, 'path_length': path_length}
+            for ca_id, ca_type, path_length, _ in definitions
+        ]
+        chain_pem = self.pki.build_chain_pem(*(item[3] for item in reversed(definitions)))
+        return {'success': True, 'hierarchy': hierarchy,
+                'issuing_ca_id': issuing['ca_id'], 'chain_pem': chain_pem}
 
     def issue_certificate(self, ca_id: int, common_name: str,
                           cert_type: str = 'server', **kwargs) -> Dict:
