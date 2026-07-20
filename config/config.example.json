@@ -49,6 +49,21 @@
             "customer_uri": "your-customer-uri"
         }
     },
+    "dns_providers": {
+        "cloudflare": {
+            "enabled": false,
+            "api_token": "",
+            "zone_id": "",
+            "ttl": 60
+        },
+        "bunny": {
+            "enabled": false,
+            "api_key": "",
+            "zone_id": "",
+            "zone_name": "example.com",
+            "ttl": 60
+        }
+    },
     "cloud_providers": {
         "aws": {
             "enabled": false,
